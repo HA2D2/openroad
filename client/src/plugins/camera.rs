@@ -712,6 +712,21 @@ fn apply_render_scale(
     let logical = window_physical.as_vec2() / window_scale_factor;
 
     if let Some(mut state) = state {
+        // A scene change (intro -> character select -> world) despawns the old
+        // 3D camera and spawns a new one on the window. The blit keeps drawing
+        // the old camera's last frame over it — a frozen view hiding the new
+        // scene — unless the newcomer is taken onto the same image.
+        let late = retarget_window_cameras(
+            world_cameras.iter_mut().map(|(e, target, _)| (e, target)),
+            &state.image,
+            target_scale_factor,
+        );
+        for (entity, _, mut projection) in &mut world_cameras {
+            if late.contains(&entity) {
+                retarget_notify(&mut projection);
+                commands.entity(entity).insert(RenderScaled);
+            }
+        }
         if state.scale == scale
             && state.window_physical == window_physical
             && state.window_scale_factor == window_scale_factor
@@ -1428,6 +1443,58 @@ mod render_scale_tests {
 
         retarget_notify(&mut projection);
         assert!(projection.is_changed());
+    }
+
+    /// A scene change (intro -> character select -> world) replaces the 3D
+    /// camera after the target already exists. The steady-state path used to
+    /// return early, leaving the newcomer on the window underneath a blit still
+    /// showing the despawned camera's last frame: a frozen view with the new
+    /// scene's characters hidden behind it.
+    #[test]
+    fn a_camera_spawned_after_scaling_is_taken_too() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut config = ClientConfig::from_file(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../config.example")
+                .to_str()
+                .unwrap(),
+        )
+        .expect("config.example.yaml matches ClientConfig");
+        config.graphics.render_scale = RenderScale(0.5);
+
+        let mut world = World::new();
+        world.insert_resource(config);
+        world.init_resource::<Assets<Image>>();
+        let window = Window::default();
+        let window_physical = UVec2::new(window.physical_width(), window.physical_height());
+        world.spawn((window, bevy::window::PrimaryWindow));
+        let image = world
+            .resource_mut::<Assets<Image>>()
+            .add(render_scale_image(window_physical / 2, false));
+        let blit = world.spawn_empty().id();
+        world.insert_resource(RenderScaleState {
+            image: image.clone(),
+            blit,
+            window_physical,
+            window_scale_factor: 1.0,
+            scale: 0.5,
+        });
+        let late = world
+            .spawn((
+                Camera3d::default(),
+                RenderTarget::Window(bevy::window::WindowRef::Primary),
+                Projection::default(),
+            ))
+            .id();
+
+        world.run_system_once(apply_render_scale).unwrap();
+
+        match world.get::<RenderTarget>(late).unwrap() {
+            RenderTarget::Image(target) => assert_eq!(target.handle, image),
+            other => panic!("late camera left on {other:?}"),
+        }
+        assert!(world.get::<RenderScaled>(late).is_some());
     }
 
     /// Bloom requires `Hdr`, and an 8-bit target would clip exactly the
