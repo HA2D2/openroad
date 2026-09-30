@@ -351,7 +351,7 @@ pub fn spawn_player_camera(
             Transform::from_translation(start),
             Fxaa::default(),
             main_view_render_settings(&config),
-            DepthPrepass,
+            // DepthPrepass,
             PlayerCamera::default(),
             GameCursorCamera::default(),
             // The ear of the game: animation sounds are emitted from their
@@ -378,7 +378,7 @@ pub fn spawn_player_camera(
             PROJECTION,
             Fxaa::default(),
             main_view_render_settings(&config),
-            DepthPrepass,
+            // DepthPrepass,
             DebugCamera,
             GameCursorCamera::default(),
             FreeCamera {
@@ -436,6 +436,79 @@ pub fn spawn_player_camera(
         });
 }
 
+/// Spawn only the free-fly [`DebugCamera`], made active unconditionally (no
+/// [`PlayerCamera`] pairing, so nothing for `switch_camera`/Tab to toggle to
+/// — `switch_camera`'s `Query::single_mut()` on `PlayerCamera` simply finds
+/// none and no-ops, which is correct here). For `SceneState::WorldDebug`:
+/// same render/reflection setup as `spawn_player_camera`'s fly half, minus
+/// the paired follow camera and its position-panel UI, since that scene
+/// wants nothing beyond terrain + a camera.
+pub fn spawn_fly_camera(
+    mut commands: Commands,
+    origin: Res<WorldOrigin>,
+    mut images: ResMut<Assets<Image>>,
+    config: Res<ClientConfig>,
+) {
+    let bloom = &config.graphics.bloom;
+    let start = origin.to_render(SpawnPoints::jangan());
+    let sky_reflections = sky_reflection_env_light(&mut images);
+
+    let fly_camera = commands
+        .spawn((
+            RenderLayers::layer(CameraLayers::Main.into()),
+            Name::from("FlyCamera"),
+            Camera3d::default(),
+            Camera {
+                order: 0,
+                is_active: true,
+                ..default()
+            },
+            Transform::from_translation(Vec3::new(start.x - 2.0, start.y + 2.5, start.z + 5.0))
+                .looking_at(start, Vec3::Y),
+            PROJECTION,
+            Fxaa::default(),
+            main_view_render_settings(&config),
+            // DepthPrepass,
+            DebugCamera,
+            GameCursorCamera::default(),
+            FreeCamera {
+                walk_speed: 50.0,
+                run_speed: 300.0,
+                ..default()
+            },
+            sky_reflections,
+        ))
+        .id();
+    attach_bloom(&mut commands, fly_camera, bloom);
+}
+
+/// Spawn the camera used by the process-level terrain benchmark.
+///
+/// This deliberately carries only the camera controller and the projection
+/// shared by the normal world camera.  Post-processing, reflection probes,
+/// cursor interaction and game-audio listener state belong to the full client,
+/// not to a terrain-rendering floor measurement.
+pub fn spawn_terrain_benchmark_camera(mut commands: Commands, origin: Res<WorldOrigin>) {
+    let start = origin.to_render(SpawnPoints::jangan());
+    commands.spawn((
+        Name::from("Terrain benchmark fly camera"),
+        Camera3d::default(),
+        Camera {
+            is_active: true,
+            ..default()
+        },
+        Transform::from_translation(Vec3::new(start.x - 2.0, start.y + 2.5, start.z + 5.0))
+            .looking_at(start, Vec3::Y),
+        PROJECTION,
+        DebugCamera,
+        FreeCamera {
+            walk_speed: 50.0,
+            run_speed: 300.0,
+            ..default()
+        },
+    ));
+}
+
 /// Spawn the in-game scene's camera: only the third-person follow
 /// [`PlayerCamera`], made active unconditionally (no fly camera, so
 /// `switch_camera` — which is World-only — never toggles it off, regardless of
@@ -468,7 +541,7 @@ pub fn spawn_game_camera(
             Transform::from_translation(start),
             Fxaa::default(),
             main_view_render_settings(&config),
-            DepthPrepass,
+            // DepthPrepass,
             PlayerCamera::default(),
             GameCursorCamera::default(),
             // The ear of the game: animation sounds are emitted from their
@@ -509,7 +582,7 @@ pub fn spawn_cinematic_camera<T>(
             // the intro scenes render harbor water too — the high-quality water's
             // reflection raymarch needs the depth prepass (see the PlayerCamera
             // comment above for the Msaa caveat)
-            DepthPrepass,
+            // DepthPrepass,
             // metal on character-selection equipment reflects the sky probe
             sky_reflection_env_light(&mut images),
         ))

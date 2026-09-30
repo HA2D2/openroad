@@ -1,4 +1,3 @@
-use crate::assets::m::block_splat_material::TerrainBlockSplatMaterial;
 use crate::assets::m::TerrainBlock;
 use crate::assets::o2::MapObject;
 use crate::commands::{Bone, MeshGroup, SpawnedFromResource};
@@ -21,6 +20,7 @@ use bevy::diagnostic::{
 };
 use bevy::ecs::entity::Entities;
 use bevy::mesh::Mesh3d;
+#[cfg(not(feature = "terrain_hand_rolled_pipeline"))]
 use bevy::pbr::MeshMaterial3d;
 use bevy::prelude::*;
 use bevy::remote::BrpResult;
@@ -112,8 +112,7 @@ pub const FRAME_TIME_MAX_WINDOW: DiagnosticPath =
 // *sequence* rather than magnitude, so it catches an alternating fast/slow
 // pattern that has a perfectly ordinary max and percentile.
 pub const FRAME_TIME_LOW_1PCT: DiagnosticPath = DiagnosticPath::const_new("frame_time/low_1pct");
-pub const FRAME_TIME_LOW_01PCT: DiagnosticPath =
-    DiagnosticPath::const_new("frame_time/low_0_1pct");
+pub const FRAME_TIME_LOW_01PCT: DiagnosticPath = DiagnosticPath::const_new("frame_time/low_0_1pct");
 pub const FRAME_TIME_JITTER: DiagnosticPath = DiagnosticPath::const_new("frame_time/jitter_ms");
 pub const FRAME_TIME_STUTTER_RATE: DiagnosticPath =
     DiagnosticPath::const_new("frame_time/stutter_rate");
@@ -190,7 +189,7 @@ impl Plugin for DiagnosticsPlugin {
         // rather than one tier's material type — `graphics.water.quality: low`
         // swaps the material, and keying on the HQ type made the row read 0
         // (and miscounted the planes as `mesh parts`) in that tier.
-        track::<MeshMaterial3d<TerrainBlockSplatMaterial>>(app, TERRAIN_BLOCK_COUNT);
+        track::<TerrainGroundMarker>(app, TERRAIN_BLOCK_COUNT);
         track::<TerrainBlock>(app, TERRAIN_TILE_COUNT);
         track::<MapObject>(app, MAP_OBJECT_COUNT);
         track::<CompoundPart>(app, COMPOUND_PART_COUNT);
@@ -229,11 +228,21 @@ fn track<C: Component>(app: &mut App, path: DiagnosticPath) {
 /// bulk of a loaded region's entities, several per `MapObject`).
 type MeshPartFilter = (
     With<Mesh3d>,
-    Without<MeshMaterial3d<TerrainBlockSplatMaterial>>,
+    Without<TerrainGroundMarker>,
     Without<WaterPlane>,
     Without<EffectNode>,
     Without<FoliageBlock>,
 );
+
+/// The component that marks a terrain ground-group entity, whichever draw path is active — see
+/// `client::assets::m::block_splat_material::REGION_TILE_SLOT_COUNT`'s doc comment for the two
+/// paths. Kept as one alias so callers (here, and `dev::render_debug`) don't need their own
+/// `#[cfg]` branches just to say "is this terrain".
+#[cfg(not(feature = "terrain_hand_rolled_pipeline"))]
+pub(crate) type TerrainGroundMarker =
+    MeshMaterial3d<crate::assets::m::block_splat_material::TerrainBlockSplatMaterial>;
+#[cfg(feature = "terrain_hand_rolled_pipeline")]
+pub(crate) type TerrainGroundMarker = crate::assets::m::block_splat_material::TerrainGroundTextures;
 
 fn mesh_part_count_system(mut diagnostics: Diagnostics, parts: Query<(), MeshPartFilter>) {
     diagnostics.add_measurement(&MESH_PART_COUNT, || parts.iter().len() as f64);
@@ -250,7 +259,7 @@ fn mesh_part_count_system(mut diagnostics: Diagnostics, parts: Query<(), MeshPar
 fn other_count_system(
     mut diagnostics: Diagnostics,
     entities: &Entities,
-    terrain: Query<(), With<MeshMaterial3d<TerrainBlockSplatMaterial>>>,
+    terrain: Query<(), With<TerrainGroundMarker>>,
     tiles: Query<(), With<TerrainBlock>>,
     objects: Query<(), With<MapObject>>,
     compound_parts: Query<(), With<CompoundPart>>,
@@ -377,8 +386,7 @@ fn frame_pacing_system(
         let stutters = history.iter().filter(|&&v| v > threshold).count();
         let window_secs = sorted.iter().sum::<f64>() / 1000.0;
         if window_secs > f64::EPSILON {
-            diagnostics
-                .add_measurement(&FRAME_TIME_STUTTER_RATE, || stutters as f64 / window_secs);
+            diagnostics.add_measurement(&FRAME_TIME_STUTTER_RATE, || stutters as f64 / window_secs);
         }
     }
 }
@@ -642,7 +650,10 @@ fn stats_text_update_system(
     }
     // Pacing-consistency rows: see the `frame_time/*` doc comment on
     // `FRAME_TIME_LOW_1PCT` for what each catches that the others don't.
-    if let Some(v) = diagnostics.get(&FRAME_TIME_LOW_1PCT).and_then(|d| d.value()) {
+    if let Some(v) = diagnostics
+        .get(&FRAME_TIME_LOW_1PCT)
+        .and_then(|d| d.value())
+    {
         lines.push_str(&format!("{:<16}{v:>6.1}ms\n", "1% low"));
     }
     if let Some(v) = diagnostics
