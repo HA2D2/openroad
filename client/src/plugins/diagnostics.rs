@@ -148,13 +148,24 @@ impl Plugin for DiagnosticsPlugin {
         // frame-time diagnostic was only present as a side effect of
         // BrpExtrasPlugin (which defensively installs it), so gating BRP
         // behind `dev_tools` silently froze the FPS counter.
-        app.add_plugins(FrameTimeDiagnosticsPlugin::default())
-            .add_plugins(EntityCountDiagnosticsPlugin::default())
-            // process/mem_usage (GB) + cpu_usage in the BRP dump: macOS
-            // sandboxing blocks ps/vmmap from outside, so leak hunts need the
-            // game to report its own footprint.
-            .add_plugins(bevy::diagnostic::SystemInformationDiagnosticsPlugin)
-            .register_diagnostic(Diagnostic::new(MESH_PART_COUNT).with_smoothing_factor(0.0))
+        //
+        // Each one only if absent: Bevy panics on a second registration, and
+        // other plugins install these on their own — `DevPlugin`'s
+        // `FpsOverlayPlugin` adds `FrameTimeDiagnosticsPlugin` before this one
+        // runs.
+        if !app.is_plugin_added::<FrameTimeDiagnosticsPlugin>() {
+            app.add_plugins(FrameTimeDiagnosticsPlugin::default());
+        }
+        if !app.is_plugin_added::<EntityCountDiagnosticsPlugin>() {
+            app.add_plugins(EntityCountDiagnosticsPlugin::default());
+        }
+        // process/mem_usage (GB) + cpu_usage in the BRP dump: macOS
+        // sandboxing blocks ps/vmmap from outside, so leak hunts need the
+        // game to report its own footprint.
+        if !app.is_plugin_added::<bevy::diagnostic::SystemInformationDiagnosticsPlugin>() {
+            app.add_plugins(bevy::diagnostic::SystemInformationDiagnosticsPlugin);
+        }
+        app.register_diagnostic(Diagnostic::new(MESH_PART_COUNT).with_smoothing_factor(0.0))
             .register_diagnostic(Diagnostic::new(OTHER_COUNT).with_smoothing_factor(0.0))
             .register_diagnostic(Diagnostic::new(TERRAIN_BUILDING_COUNT).with_smoothing_factor(0.0))
             .register_diagnostic(Diagnostic::new(FRAME_TIME_MAX_WINDOW).with_smoothing_factor(0.0))
@@ -1107,4 +1118,22 @@ fn sorted_phase<P: SortedPhaseItem>(app: &mut App, phase: &'static str) {
         .after(RenderSystems::PrepareResourcesBatchPhases)
         .before(RenderSystems::Render),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The diagnostics tier crashed the client at startup ("plugin was already
+    /// added"): `DevPlugin`'s `FpsOverlayPlugin` installs
+    /// `FrameTimeDiagnosticsPlugin` first, and this plugin added it again.
+    #[test]
+    fn registers_after_another_plugin_installed_frame_time_diagnostics() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(FrameTimeDiagnosticsPlugin::default())
+            .add_plugins(EntityCountDiagnosticsPlugin::default())
+            .add_plugins(DiagnosticsPlugin);
+        assert!(app.is_plugin_added::<DiagnosticsPlugin>());
+    }
 }
