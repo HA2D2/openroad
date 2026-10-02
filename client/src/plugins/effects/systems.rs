@@ -1,12 +1,13 @@
 use bevy::asset::{AssetEvent, Assets};
 use bevy::camera::{Camera, Camera3d, RenderTarget};
 use bevy::ecs::hierarchy::ChildOf;
-use bevy::math::{EulerRot, Mat3, Quat, Vec3};
+use bevy::math::{EulerRot, Mat3, Quat, Vec3, Vec4};
 use bevy::mesh::MeshTag;
 use bevy::prelude::{
-    Children, Commands, DetectChangesMut, Entity, GlobalTransform, Has, MessageReader, Query, Res,
-    ResMut, Time, Transform, Visibility, With, Without,
+    Children, Commands, DetectChangesMut, Entity, GlobalTransform, Handle, Has, Local,
+    MessageReader, Query, Res, ResMut, Time, Transform, Visibility, With, Without,
 };
+use bevy::utils::Parallel;
 use rand::Rng;
 
 use crate::assets::efp::format::{
@@ -937,61 +938,75 @@ pub fn sample_graphs(
         (Without<PooledParticle>, Without<EffectSimPaused>),
     >,
     intensities: Query<&EffectIntensity>,
+    // Texture-slide writes go to shared material assets, so they are queued
+    // per thread and applied after the parallel pass.
+    mut uv_writes: Local<Parallel<Vec<(Handle<SroEffectMaterial>, Vec4)>>>,
 ) {
-    for (entity, node, cache, mut transform, visual) in &mut nodes {
-        // Nodes without any graph binding (resolved at spawn) sample nothing.
-        if cache.scale.is_none()
-            && cache.diffuse.is_none()
-            && cache.uv.is_none()
-            && cache.random_scale.is_none()
-        {
-            continue;
-        }
-        let Some(effect) = effects.get(&node.handle) else {
-            continue;
-        };
-        let node_data = &effect.effect.nodes[node.node];
-        let frac = node.life_frac();
-
-        // Scale graphs are RENDER-ONLY, like the shape spin: the exe's
-        // ScaleGraph/SetGraphRandomScale write the per-instance scale
-        // register absolutely at draw time, never a hierarchy transform.
-        // Writing the sampled value onto an invisible node's Transform (a
-        // leaf emitter anchor template samples the graph meant for its
-        // copies) multiplied every emitted copy's offset and inherited
-        // size by it via propagation — the talisman's anchors sampled
-        // ~5.7 and wrapped the wards in an oversized second haze layer
-        // (BRP-measured 2026-07-29).
-        if visual.is_some() {
-            let scale = sample_random_scale(cache, node_data, entity, node.age)
-                .or_else(|| sample_scale(&cache.scale, node_data, frac));
-            if let Some(scale) = scale {
-                if transform.scale != scale {
-                    transform.scale = scale;
-                }
+    // Everything else is per node (own Transform, MeshTag, EffectVisual), so
+    // it runs across the compute pool: single-threaded this was ~0.4 ms per
+    // frame at a crowded spot (trace of 2026-10-02).
+    nodes
+        .par_iter_mut()
+        .for_each(|(entity, node, cache, mut transform, visual)| {
+            // Nodes without any graph binding (resolved at spawn) sample nothing.
+            if cache.scale.is_none()
+                && cache.diffuse.is_none()
+                && cache.uv.is_none()
+                && cache.random_scale.is_none()
+            {
+                return;
             }
-        }
+            let Some(effect) = effects.get(&node.handle) else {
+                return;
+            };
+            let node_data = &effect.effect.nodes[node.node];
+            let frac = node.life_frac();
 
-        // Per-effect brightness dim (rare auras), applied to the tint RGB.
-        let intensity = intensities.get(node.root).map_or(1.0, |i| i.0);
-        if let Some((mut visual, mut tag)) = visual {
-            if let Some(argb) = sample_argb(&cache.diffuse, node_data, frac) {
-                let argb = dim_argb_rgb(argb, intensity);
-                if argb != visual.last_argb {
-                    tag.0 = argb;
-                    visual.last_argb = argb;
-                }
-            }
-            if let (Some(uv_source), Some(uv_material)) = (&cache.uv, visual.uv_material.clone()) {
-                if let Some(uv) = sample_texture_slide(uv_source, node_data, node.age) {
-                    if uv.distance_squared(visual.last_uv) > 1e-8 {
-                        if let Some(mut material) = materials.get_mut(&uv_material) {
-                            material.uv_offset_scale = uv;
-                        }
-                        visual.last_uv = uv;
+            // Scale graphs are RENDER-ONLY, like the shape spin: the exe's
+            // ScaleGraph/SetGraphRandomScale write the per-instance scale
+            // register absolutely at draw time, never a hierarchy transform.
+            // Writing the sampled value onto an invisible node's Transform (a
+            // leaf emitter anchor template samples the graph meant for its
+            // copies) multiplied every emitted copy's offset and inherited
+            // size by it via propagation — the talisman's anchors sampled
+            // ~5.7 and wrapped the wards in an oversized second haze layer
+            // (BRP-measured 2026-07-29).
+            if visual.is_some() {
+                let scale = sample_random_scale(cache, node_data, entity, node.age)
+                    .or_else(|| sample_scale(&cache.scale, node_data, frac));
+                if let Some(scale) = scale {
+                    if transform.scale != scale {
+                        transform.scale = scale;
                     }
                 }
             }
+
+            // Per-effect brightness dim (rare auras), applied to the tint RGB.
+            let intensity = intensities.get(node.root).map_or(1.0, |i| i.0);
+            if let Some((mut visual, mut tag)) = visual {
+                if let Some(argb) = sample_argb(&cache.diffuse, node_data, frac) {
+                    let argb = dim_argb_rgb(argb, intensity);
+                    if argb != visual.last_argb {
+                        tag.0 = argb;
+                        visual.last_argb = argb;
+                    }
+                }
+                if let (Some(uv_source), Some(uv_material)) =
+                    (&cache.uv, visual.uv_material.clone())
+                {
+                    if let Some(uv) = sample_texture_slide(uv_source, node_data, node.age) {
+                        if uv.distance_squared(visual.last_uv) > 1e-8 {
+                            uv_writes.borrow_local_mut().push((uv_material, uv));
+                            visual.last_uv = uv;
+                        }
+                    }
+                }
+            }
+        });
+
+    for (uv_material, uv) in uv_writes.drain() {
+        if let Some(mut material) = materials.get_mut(&uv_material) {
+            material.uv_offset_scale = uv;
         }
     }
 }
