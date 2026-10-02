@@ -170,7 +170,7 @@ fn main() {
             },
             TweeningPlugin,
             scenes::SceneManagerPlugin,
-            // plugins::diagnostics::DiagnosticsPlugin,
+            // (DiagnosticsPlugin: registered with the `diagnostics` tier below)
             plugins::net::plugin::NetworkPlugin,
             (
                 plugins::system_window::SystemWindowPlugin,
@@ -263,6 +263,12 @@ fn main() {
         );
         app.add_plugins(
             (
+                // The world_counts/* and cache_counts/* gauges, the frame-pacing
+                // metrics and the corner performance panel. Registered here,
+                // in the measurement tier, rather than for every player; it
+                // must precede BrpExtrasPlugin, which only installs its own
+                // FrameTimeDiagnosticsPlugin when none is present yet.
+                plugins::diagnostics::DiagnosticsPlugin,
                 // `openroad/diagnostics` dumps the whole DiagnosticsStore
                 // (incl. the world_counts/* entity categories) over BRP —
                 // brp_extras only exposes FPS/frame-time.
