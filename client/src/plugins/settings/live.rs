@@ -470,7 +470,8 @@ mod test {
                 let Ok(text) = std::fs::read_to_string(&path) else {
                     continue;
                 };
-                let name = path.to_string_lossy().to_string();
+                // `/`-separated so the ALLOWED suffixes match on Windows too
+                let name = path.to_string_lossy().replace('\\', "/");
                 if let Some(i) = ALLOWED.iter().position(|(f, _)| name.ends_with(f)) {
                     seen_exception[i] = true;
                     continue;
