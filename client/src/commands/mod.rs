@@ -73,11 +73,6 @@ pub struct ReversedWinding(pub bool);
 #[derive(Component)]
 pub struct MeshIndexMap(pub HashMap<u32, Entity>);
 
-/// The Transform/Name wrapper entity `spawn_mesh_groups` stamps out per mesh
-/// group. Pure marker so entity-count diagnostics can attribute these.
-#[derive(Component)]
-pub struct MeshGroup;
-
 /// One prepared mesh part: mesh index within its group, the mesh + material, the
 /// bone names for skinning (empty if unskinned), the bind poses, and the
 /// per-part LOD cull range (see `mesh_visibility_range`).
@@ -1021,12 +1016,33 @@ impl SpawnResource {
         resource_entity: &mut ChildSpawner,
         bone_entities: &HashMap<String, Entity>,
     ) -> HashMap<u32, Entity> {
+        // Mesh parts sit directly under the resource root. There used to be a
+        // per-primitive-group wrapper entity (identity transform, a name) in
+        // between: nothing read it, but at ~4,800 per loaded world it made up
+        // ~10% of all entities, each paying the per-frame visibility pass.
         let mut mesh_entities = HashMap::new();
-        for (name, children) in mesh_groups {
-            resource_entity.spawn((Transform::default(), Visibility::default(), name, MeshGroup)).with_children(|child| {
-                for (mesh_idx, mesh_3d, mesh_material_3d, bones, inverse_bindposes, visibility_range) in children {
+        let child = resource_entity;
+        for (_group, children) in mesh_groups {
+            {
+                for (
+                    mesh_idx,
+                    mesh_3d,
+                    mesh_material_3d,
+                    bones,
+                    inverse_bindposes,
+                    visibility_range,
+                ) in children
+                {
                     if bones.is_empty() {
-                        let e = child.spawn((mesh_3d, mesh_material_3d, Transform::default(), Visibility::default(), visibility_range)).id();
+                        let e = child
+                            .spawn((
+                                mesh_3d,
+                                mesh_material_3d,
+                                Transform::default(),
+                                Visibility::default(),
+                                visibility_range,
+                            ))
+                            .id();
                         mesh_entities.insert(mesh_idx, e);
                     } else {
                         // The joint list must stay index-aligned with the
@@ -1035,7 +1051,7 @@ impl SpawnResource {
                         // the phantom `Bone03` on EU heavy leg armor) would
                         // otherwise shorten the list and either drop the whole
                         // mesh (invisible legs) or misalign skinning. Map such
-                        // bones to the group entity; since no vertex references
+                        // bones to the resource root; since no vertex references
                         // them, they have no visible effect.
                         let fallback = child.target_entity();
                         let joints = bones.iter().map(|bone| {
@@ -1051,21 +1067,23 @@ impl SpawnResource {
                             warn!("skinned mesh {} has no bind poses; skipping", mesh_idx);
                             continue;
                         };
-                        let e = child.spawn((
-                            mesh_3d,
-                            mesh_material_3d,
-                            Transform::default(),
-                            Visibility::default(),
-                            visibility_range,
-                            SkinnedMesh {
-                                joints,
-                                inverse_bindposes
-                            }
-                        )).id();
+                        let e = child
+                            .spawn((
+                                mesh_3d,
+                                mesh_material_3d,
+                                Transform::default(),
+                                Visibility::default(),
+                                visibility_range,
+                                SkinnedMesh {
+                                    joints,
+                                    inverse_bindposes,
+                                },
+                            ))
+                            .id();
                         mesh_entities.insert(mesh_idx, e);
                     }
                 }
-            });
+            }
         }
         mesh_entities
     }

@@ -1,6 +1,6 @@
 use crate::assets::m::TerrainBlock;
 use crate::assets::o2::MapObject;
-use crate::commands::{Bone, MeshGroup, SpawnedFromResource};
+use crate::commands::{Bone, SpawnedFromResource};
 use crate::plugins::animation_culling::PausedAnimationGraph;
 use crate::plugins::camera::CameraLayers;
 use crate::plugins::dynamic_resource_loader::UnloadedResource;
@@ -56,7 +56,6 @@ pub const COMPOUND_PART_COUNT: DiagnosticPath =
     DiagnosticPath::const_new("world_counts/compound_parts");
 pub const RESOURCE_ROOT_COUNT: DiagnosticPath =
     DiagnosticPath::const_new("world_counts/resource_roots");
-pub const MESH_GROUP_COUNT: DiagnosticPath = DiagnosticPath::const_new("world_counts/mesh_groups");
 pub const MESH_PART_COUNT: DiagnosticPath = DiagnosticPath::const_new("world_counts/mesh_parts");
 pub const FOLIAGE_BLOCK_COUNT: DiagnosticPath =
     DiagnosticPath::const_new("world_counts/foliage_blocks");
@@ -223,7 +222,6 @@ impl Plugin for DiagnosticsPlugin {
         track::<MapObject>(app, MAP_OBJECT_COUNT);
         track::<CompoundPart>(app, COMPOUND_PART_COUNT);
         track::<SpawnedFromResource>(app, RESOURCE_ROOT_COUNT);
-        track::<MeshGroup>(app, MESH_GROUP_COUNT);
         track::<WaterPlane>(app, WATER_COUNT);
         track::<FoliageBlock>(app, FOLIAGE_BLOCK_COUNT);
         track::<EffectInstance>(app, EFFECT_INSTANCE_COUNT);
@@ -289,7 +287,6 @@ fn other_count_system(
     objects: Query<(), With<MapObject>>,
     compound_parts: Query<(), With<CompoundPart>>,
     resource_roots: Query<(), With<SpawnedFromResource>>,
-    mesh_groups: Query<(), With<MeshGroup>>,
     mesh_parts: Query<(), MeshPartFilter>,
     foliage: Query<(), With<FoliageBlock>>,
     water: Query<(), With<WaterPlane>>,
@@ -303,7 +300,6 @@ fn other_count_system(
             + objects.iter().len()
             + compound_parts.iter().len()
             + resource_roots.iter().len()
-            + mesh_groups.iter().len()
             + mesh_parts.iter().len()
             + foliage.iter().len()
             + water.iter().len()
@@ -554,14 +550,13 @@ fn fps_update_system(
 
 /// Label/diagnostic pairs rendered by `stats_text_update_system`, top to
 /// bottom. Adding a category = one `track::<Marker>` call + one row here.
-static PANEL_ROWS: [(&str, DiagnosticPath); 17] = [
+static PANEL_ROWS: [(&str, DiagnosticPath); 16] = [
     ("entities", EntityCountDiagnosticsPlugin::ENTITY_COUNT),
     ("terrain blocks", TERRAIN_BLOCK_COUNT),
     ("terrain tiles", TERRAIN_TILE_COUNT),
     ("map objects", MAP_OBJECT_COUNT),
     ("compound parts", COMPOUND_PART_COUNT),
     ("resource roots", RESOURCE_ROOT_COUNT),
-    ("mesh groups", MESH_GROUP_COUNT),
     ("mesh parts", MESH_PART_COUNT),
     ("foliage", FOLIAGE_BLOCK_COUNT),
     ("water", WATER_COUNT),
