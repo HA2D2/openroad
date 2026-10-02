@@ -22,8 +22,6 @@ use bevy::diagnostic::{
 };
 use bevy::ecs::entity::Entities;
 use bevy::mesh::Mesh3d;
-#[cfg(not(feature = "terrain_hand_rolled_pipeline"))]
-use bevy::pbr::MeshMaterial3d;
 use bevy::prelude::*;
 use bevy::remote::BrpResult;
 use bevy::render::render_phase::{
@@ -266,15 +264,10 @@ type MeshPartFilter = (
     Without<FoliageBlock>,
 );
 
-/// The component that marks a terrain ground-group entity, whichever draw path is active — see
-/// `client::assets::m::block_splat_material::REGION_TILE_SLOT_COUNT`'s doc comment for the two
-/// paths. Kept as one alias so callers (here, and `dev::render_debug`) don't need their own
-/// `#[cfg]` branches just to say "is this terrain".
-#[cfg(not(feature = "terrain_hand_rolled_pipeline"))]
-pub(crate) type TerrainGroundMarker =
-    MeshMaterial3d<crate::assets::m::block_splat_material::TerrainBlockSplatMaterial>;
-#[cfg(feature = "terrain_hand_rolled_pipeline")]
-pub(crate) type TerrainGroundMarker = crate::assets::m::block_splat_material::TerrainGroundTextures;
+/// The component that marks a terrain ground-group entity, whichever draw path is active
+/// (`graphics.terrain.pipeline`). Kept as an alias so callers (here, and `dev::render_debug`)
+/// say "is this terrain" in one place.
+pub(crate) type TerrainGroundMarker = crate::plugins::map::terrain::TerrainGround;
 
 fn mesh_part_count_system(mut diagnostics: Diagnostics, parts: Query<(), MeshPartFilter>) {
     diagnostics.add_measurement(&MESH_PART_COUNT, || parts.iter().len() as f64);

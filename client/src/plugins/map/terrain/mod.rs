@@ -11,17 +11,15 @@ use bevy::prelude::Name;
 use bevy::prelude::*;
 
 use crate::assets::m::block_mesh::merge_block_meshes;
-#[cfg(not(feature = "terrain_hand_rolled_pipeline"))]
-use crate::assets::m::block_splat_material::TerrainBlockSplatMaterial;
-#[cfg(feature = "terrain_hand_rolled_pipeline")]
-use crate::assets::m::block_splat_material::TerrainGroundTextures;
 use crate::assets::m::block_splat_material::TerrainLightmapFallback;
+use crate::assets::m::block_splat_material::{TerrainBlockSplatMaterial, TerrainGroundTextures};
 use crate::assets::m::{TerrainBlock, WaterType, JMXVMAPM};
 use crate::assets::mfo::JMXVMFO;
 use crate::assets::nvm::JMXVNVM;
 use crate::assets::o2::JMXVMAPO2;
 use crate::assets::t::JMXVMAPT;
 use crate::plugins::asset_residency::AssetResidency;
+use crate::plugins::config::graphics::TerrainPipeline;
 use crate::plugins::cursor::interactions::GameCursorTarget;
 use crate::plugins::dev::aabb_lines::DebugAabb;
 use crate::plugins::map::assets::MapsAssets;
@@ -30,7 +28,6 @@ use crate::plugins::world_origin::WorldOrigin;
 use crate::util::mesh::needs_winding_reversal;
 use crate::util::region::RegionIdExt;
 
-#[cfg(feature = "terrain_hand_rolled_pipeline")]
 pub mod render;
 pub mod rendering;
 
@@ -490,6 +487,19 @@ pub fn load_terrain_dynamically(
     }
 }
 
+/// Marks a merged terrain ground-group entity, whichever draw path built it
+/// (`graphics.terrain.pipeline`): the two paths carry different components
+/// (`MeshMaterial3d<TerrainBlockSplatMaterial>` vs. `TerrainGroundTextures`),
+/// and diagnostics / the render-debug panel just need "is this terrain".
+#[derive(Component)]
+pub struct TerrainGround;
+
+/// The per-region ground component of whichever draw path is active.
+enum GroundMaterial {
+    Material(MeshMaterial3d<TerrainBlockSplatMaterial>),
+    HandRolled(TerrainGroundTextures),
+}
+
 /// How many merged terrain groups may be built in one frame, across all
 /// regions. One build merges the group's block meshes and copies tile pixel
 /// data into the splat texture array — several milliseconds of main-thread
@@ -518,9 +528,10 @@ pub fn load_terrain_system(
     lightmap_fallback: Res<TerrainLightmapFallback>,
     mut image_assets: ResMut<Assets<Image>>,
     mut mesh_assets: ResMut<Assets<Mesh>>,
-    #[cfg(not(feature = "terrain_hand_rolled_pipeline"))] mut terrain_block_material_assets: ResMut<
-        Assets<TerrainBlockSplatMaterial>,
-    >,
+    mut terrain_block_material_assets: ResMut<Assets<TerrainBlockSplatMaterial>>,
+    // Fixed at startup by MapPlugin from `graphics.terrain.pipeline` (absent = material):
+    // only the pipeline registered then can draw what is built here.
+    pipeline: Option<Res<TerrainPipeline>>,
     // Exactly one water tier is inserted by `setup_terrain_mesh` (`graphics.water.quality`),
     // so both are optional and the spawn below picks whichever is present.
     water_material: Option<Res<WaterNormalMaterial>>,
@@ -647,27 +658,36 @@ pub fn load_terrain_system(
             let Ok(mut entity) = commands.get_entity(terrain_entity) else {
                 continue;
             };
-            #[cfg(not(feature = "terrain_hand_rolled_pipeline"))]
-            let ground_material = {
+            let hand_rolled = pipeline.as_deref() == Some(&TerrainPipeline::HandRolled);
+            let ground_material = if hand_rolled {
+                GroundMaterial::HandRolled(TerrainGroundTextures::from(
+                    &group_blocks,
+                    region_lightmap,
+                    &mut image_assets,
+                ))
+            } else {
                 let material = TerrainBlockSplatMaterial::from(
                     &group_blocks,
                     region_lightmap,
                     &mut image_assets,
                 );
-                MeshMaterial3d(terrain_block_material_assets.add(material))
+                GroundMaterial::Material(MeshMaterial3d(
+                    terrain_block_material_assets.add(material),
+                ))
             };
-            #[cfg(feature = "terrain_hand_rolled_pipeline")]
-            let ground_material =
-                TerrainGroundTextures::from(&group_blocks, region_lightmap, &mut image_assets);
             entity.with_children(|terrain_entity: &mut bevy::ecs::hierarchy::ChildSpawnerCommands| {
                 let mut group_entity = terrain_entity.spawn((
                     Mesh3d(mesh),
-                    ground_material,
+                    TerrainGround,
                     group_transform,
                     Visibility::default(),
                     group_aabb,
                     Name::from(format!("Ground group {}x{} ({})", gx, gz, terrain_name.as_str())),
                 ));
+                match ground_material {
+                    GroundMaterial::Material(material) => group_entity.insert(material),
+                    GroundMaterial::HandRolled(textures) => group_entity.insert(textures),
+                };
                 if terrain_only.is_some() {
                     return;
                 }
