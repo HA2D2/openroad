@@ -37,6 +37,8 @@ impl Plugin for MapPlugin {
             .register_type::<TerrainLoadState>()
             .init_resource::<SroMeshes>()
             .init_resource::<SroBindPoses>()
+            .init_resource::<SroAnimationClips>()
+            .init_resource::<SroMaterialVariants>()
             .init_resource::<SpawnedMapObjects>()
             .init_resource::<objects::UnknownObjectIds>()
             .configure_loading_state(

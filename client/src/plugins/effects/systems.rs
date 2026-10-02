@@ -546,200 +546,210 @@ pub fn run_programs(
     >,
 ) {
     let dt = time.delta_secs() * speed.0;
-    for (node, cache, mut motion, mut transform, billboard, has_visual) in &mut nodes {
-        // Inert nodes (no motion commands, no BAN drive, nothing in flight)
-        // have nothing to integrate; skipping them also keeps their
-        // Transform un-Changed so transform propagation ignores them.
-        if cache.motion.is_empty()
-            && cache.ban.is_none()
-            && motion.velocity == Vec3::ZERO
-            && motion.rvel_deg == Vec3::ZERO
-            && motion.spin_deg_vel == 0.0
-        {
-            continue;
-        }
+    // Each node only touches its own components and reads shared assets, so
+    // the per-node work runs across the compute pool (single-threaded it was
+    // ~0.6 ms per frame at a crowded spot, trace of 2026-10-02).
+    nodes.par_iter_mut().for_each(
+        |(node, cache, mut motion, mut transform, billboard, has_visual)| {
+            // Inert nodes (no motion commands, no BAN drive, nothing in flight)
+            // have nothing to integrate; skipping them also keeps their
+            // Transform un-Changed so transform propagation ignores them.
+            if cache.motion.is_empty()
+                && cache.ban.is_none()
+                && motion.velocity == Vec3::ZERO
+                && motion.rvel_deg == Vec3::ZERO
+                && motion.spin_deg_vel == 0.0
+            {
+                return;
+            }
 
-        let Some(effect) = effects.get(&node.handle) else {
-            continue;
-        };
-        let node_data = &effect.effect.nodes[node.node];
-        let frac = node.life_frac();
+            let Some(effect) = effects.get(&node.handle) else {
+                return;
+            };
+            let node_data = &effect.effect.nodes[node.node];
+            let frac = node.life_frac();
 
-        if let Some(ban) = &cache.ban {
-            apply_ban_controller(ban, node.age, &bans, &mut motion, &mut transform);
-        }
+            if let Some(ban) = &cache.ban {
+                apply_ban_controller(ban, node.age, &bans, &mut motion, &mut transform);
+            }
 
-        // Execute program commands on their scheduled effect frames — the
-        // original compiles one runtime command per occupied 50 ms row and
-        // runs each row's list once (compiler 0xca9070, executor 0xc84f90).
-        // Frames crossed since the last run are replayed (bounded after a
-        // hitch); forces add their FULL authored magnitude per scheduled
-        // frame with no dt — that per-frame impulse IS the authored unit.
-        let target = (node.age * EFFECT_FPS) as u32 + 1;
-        let crossed = target.saturating_sub(motion.sim_frame).min(16);
-        for frame in (target - crossed)..target {
-            for slot in &cache.motion {
-                if !slot.schedule.contains(frame) {
-                    continue;
+            // Execute program commands on their scheduled effect frames — the
+            // original compiles one runtime command per occupied 50 ms row and
+            // runs each row's list once (compiler 0xca9070, executor 0xc84f90).
+            // Frames crossed since the last run are replayed (bounded after a
+            // hitch); forces add their FULL authored magnitude per scheduled
+            // frame with no dt — that per-frame impulse IS the authored unit.
+            let target = (node.age * EFFECT_FPS) as u32 + 1;
+            let crossed = target.saturating_sub(motion.sim_frame).min(16);
+            for frame in (target - crossed)..target {
+                for slot in &cache.motion {
+                    if !slot.schedule.contains(frame) {
+                        continue;
+                    }
+                    let Some(source) = slot.source.resolve(node_data) else {
+                        continue;
+                    };
+                    use EffectCommand as C;
+                    match &source.command {
+                        C::SetPosition(v) => {
+                            let origin = motion.origin;
+                            transform.translation = origin + motion.origin_rotation * *v;
+                        }
+                        C::SetSpherePos(v) => {
+                            let offset = motion.origin_rotation * random_in_ellipsoid(*v);
+                            transform.translation = motion.origin + offset;
+                        }
+                        C::SetConePos(cone) => {
+                            // Spawn at a random point in a cone around local +Y —
+                            // the position sibling of SetConeVel (distance from
+                            // x/y, spread from the z half-angle).
+                            let dir =
+                                random_in_cone(motion.origin_rotation * Vec3::Y, cone.degrees.z);
+                            transform.translation = motion.origin + dir * cone_speed(cone.degrees);
+                        }
+                        C::SetVelocity(v) => {
+                            motion.velocity = motion.origin_rotation * *v;
+                        }
+                        C::SetConeVel(cone) => {
+                            let dir =
+                                random_in_cone(motion.origin_rotation * Vec3::Y, cone.degrees.z);
+                            motion.velocity = dir * cone_speed(cone.degrees);
+                        }
+                        C::SetRotation(rot) => {
+                            motion.base_rotation = mirror_quat(Quat::from_euler(
+                                EulerRot::XYZ,
+                                rot.euler_degrees.x.to_radians(),
+                                rot.euler_degrees.y.to_radians(),
+                                rot.euler_degrees.z.to_radians(),
+                            ));
+                        }
+                        C::SetRotationAxis(axis) => {
+                            let a = axis.axis_angle;
+                            motion.base_rotation = mirror_quat(Quat::from_axis_angle(
+                                a.truncate().try_normalize().unwrap_or(Vec3::Y),
+                                a.w.to_radians(),
+                            ));
+                        }
+                        C::SetRotationMat(mat) => {
+                            motion.base_rotation =
+                                mirror_quat(Quat::from_mat3(&Mat3::from_mat4(*mat)));
+                        }
+                        C::SetRVelocity(rot) => {
+                            // Mirror-conjugated like the quats: rotations about
+                            // the mirrored X axis keep their sense, Y/Z reverse.
+                            let e = rot.euler_degrees;
+                            motion.rvel_deg = Vec3::new(e.x, -e.y, -e.z);
+                        }
+                        C::SetRVelocityAxis(axis) => {
+                            let a = axis.axis_angle;
+                            motion.spin_axis = mirror_axis(a.truncate());
+                            motion.spin_deg_vel = a.w;
+                        }
+                        C::SetRVelocityMat(mat) => {
+                            // Matrix form of rotational velocity: decompose to an
+                            // axis-angle spin (the sibling of SetRVelocityAxis).
+                            let (axis, angle) =
+                                Quat::from_mat3(&Mat3::from_mat4(*mat)).to_axis_angle();
+                            motion.spin_axis = mirror_axis(axis);
+                            motion.spin_deg_vel = angle.to_degrees();
+                        }
+                        C::SetShapeRot(axis) => {
+                            motion.spin_axis = mirror_axis(axis.axis_angle.truncate());
+                            motion.spin_deg = axis.axis_angle.w;
+                        }
+                        C::SetShapeRotVel(axis) => {
+                            motion.spin_axis = mirror_axis(axis.axis_angle.truncate());
+                            motion.spin_deg_vel = axis.axis_angle.w;
+                        }
+                        C::Force(v) => {
+                            let accel = motion.origin_rotation * *v;
+                            motion.velocity += accel;
+                        }
+                        C::ConeForce(cone) => {
+                            // Exe RE (case 70): identical cone construction to
+                            // SetConeVel but *added* to velocity, re-randomized
+                            // per scheduled frame.
+                            let dir =
+                                random_in_cone(motion.origin_rotation * Vec3::Y, cone.degrees.z);
+                            motion.velocity += dir * cone_speed(cone.degrees);
+                        }
+                        C::Attraction(strength) => {
+                            let to_origin = motion.origin - transform.translation;
+                            let dir = to_origin.try_normalize().unwrap_or(Vec3::ZERO);
+                            motion.velocity += dir * *strength;
+                        }
+                        // BAN paths sample continuously below; graphs in
+                        // `sample_graphs`; emission in `emit_particles`.
+                        _ => {}
+                    }
                 }
+            }
+            motion.sim_frame = target;
+
+            // Keyframed BAN position/rotation paths: the keys are per-frame rows,
+            // sampled continuously (lerped) for smooth motion at render rate.
+            for slot in &cache.motion {
                 let Some(source) = slot.source.resolve(node_data) else {
                     continue;
                 };
                 use EffectCommand as C;
                 match &source.command {
-                    C::SetPosition(v) => {
-                        let origin = motion.origin;
-                        transform.translation = origin + motion.origin_rotation * *v;
+                    C::SetBanPos(keys) => {
+                        if let Some(pos) = sample_keyframes(keys, frac, Vec3::lerp) {
+                            let origin_rotation = motion.origin_rotation;
+                            transform.translation = motion.origin + origin_rotation * pos;
+                        }
                     }
-                    C::SetSpherePos(v) => {
-                        let offset = motion.origin_rotation * random_in_ellipsoid(*v);
-                        transform.translation = motion.origin + offset;
+                    C::SetBanRot(keys) => {
+                        if let Some(rotation) = sample_mat_rotation(keys, frac) {
+                            motion.base_rotation = mirror_quat(rotation);
+                        }
                     }
-                    C::SetConePos(cone) => {
-                        // Spawn at a random point in a cone around local +Y —
-                        // the position sibling of SetConeVel (distance from
-                        // x/y, spread from the z half-angle).
-                        let dir = random_in_cone(motion.origin_rotation * Vec3::Y, cone.degrees.z);
-                        transform.translation = motion.origin + dir * cone_speed(cone.degrees);
-                    }
-                    C::SetVelocity(v) => {
-                        motion.velocity = motion.origin_rotation * *v;
-                    }
-                    C::SetConeVel(cone) => {
-                        let dir = random_in_cone(motion.origin_rotation * Vec3::Y, cone.degrees.z);
-                        motion.velocity = dir * cone_speed(cone.degrees);
-                    }
-                    C::SetRotation(rot) => {
-                        motion.base_rotation = mirror_quat(Quat::from_euler(
-                            EulerRot::XYZ,
-                            rot.euler_degrees.x.to_radians(),
-                            rot.euler_degrees.y.to_radians(),
-                            rot.euler_degrees.z.to_radians(),
-                        ));
-                    }
-                    C::SetRotationAxis(axis) => {
-                        let a = axis.axis_angle;
-                        motion.base_rotation = mirror_quat(Quat::from_axis_angle(
-                            a.truncate().try_normalize().unwrap_or(Vec3::Y),
-                            a.w.to_radians(),
-                        ));
-                    }
-                    C::SetRotationMat(mat) => {
-                        motion.base_rotation = mirror_quat(Quat::from_mat3(&Mat3::from_mat4(*mat)));
-                    }
-                    C::SetRVelocity(rot) => {
-                        // Mirror-conjugated like the quats: rotations about
-                        // the mirrored X axis keep their sense, Y/Z reverse.
-                        let e = rot.euler_degrees;
-                        motion.rvel_deg = Vec3::new(e.x, -e.y, -e.z);
-                    }
-                    C::SetRVelocityAxis(axis) => {
-                        let a = axis.axis_angle;
-                        motion.spin_axis = mirror_axis(a.truncate());
-                        motion.spin_deg_vel = a.w;
-                    }
-                    C::SetRVelocityMat(mat) => {
-                        // Matrix form of rotational velocity: decompose to an
-                        // axis-angle spin (the sibling of SetRVelocityAxis).
-                        let (axis, angle) = Quat::from_mat3(&Mat3::from_mat4(*mat)).to_axis_angle();
-                        motion.spin_axis = mirror_axis(axis);
-                        motion.spin_deg_vel = angle.to_degrees();
-                    }
-                    C::SetShapeRot(axis) => {
-                        motion.spin_axis = mirror_axis(axis.axis_angle.truncate());
-                        motion.spin_deg = axis.axis_angle.w;
-                    }
-                    C::SetShapeRotVel(axis) => {
-                        motion.spin_axis = mirror_axis(axis.axis_angle.truncate());
-                        motion.spin_deg_vel = axis.axis_angle.w;
-                    }
-                    C::Force(v) => {
-                        let accel = motion.origin_rotation * *v;
-                        motion.velocity += accel;
-                    }
-                    C::ConeForce(cone) => {
-                        // Exe RE (case 70): identical cone construction to
-                        // SetConeVel but *added* to velocity, re-randomized
-                        // per scheduled frame.
-                        let dir = random_in_cone(motion.origin_rotation * Vec3::Y, cone.degrees.z);
-                        motion.velocity += dir * cone_speed(cone.degrees);
-                    }
-                    C::Attraction(strength) => {
-                        let to_origin = motion.origin - transform.translation;
-                        let dir = to_origin.try_normalize().unwrap_or(Vec3::ZERO);
-                        motion.velocity += dir * *strength;
-                    }
-                    // BAN paths sample continuously below; graphs in
-                    // `sample_graphs`; emission in `emit_particles`.
                     _ => {}
                 }
             }
-        }
-        motion.sim_frame = target;
 
-        // Keyframed BAN position/rotation paths: the keys are per-frame rows,
-        // sampled continuously (lerped) for smooth motion at render rate.
-        for slot in &cache.motion {
-            let Some(source) = slot.source.resolve(node_data) else {
-                continue;
-            };
-            use EffectCommand as C;
-            match &source.command {
-                C::SetBanPos(keys) => {
-                    if let Some(pos) = sample_keyframes(keys, frac, Vec3::lerp) {
-                        let origin_rotation = motion.origin_rotation;
-                        transform.translation = motion.origin + origin_rotation * pos;
-                    }
-                }
-                C::SetBanRot(keys) => {
-                    if let Some(rotation) = sample_mat_rotation(keys, frac) {
-                        motion.base_rotation = mirror_quat(rotation);
-                    }
-                }
-                _ => {}
+            // Integrate. Authored velocities are units-per-effect-frame (exe RE:
+            // `pos += vel` once per 50 ms frame, no dt) — ×EFFECT_FPS converts
+            // to per-second so the render-rate integration matches the original
+            // trajectory. Writes are guarded so motionless nodes don't dirty
+            // their Transform (and drag the subtree through propagation).
+            if motion.velocity != Vec3::ZERO {
+                transform.translation += motion.velocity * (EFFECT_FPS * dt);
             }
-        }
-
-        // Integrate. Authored velocities are units-per-effect-frame (exe RE:
-        // `pos += vel` once per 50 ms frame, no dt) — ×EFFECT_FPS converts
-        // to per-second so the render-rate integration matches the original
-        // trajectory. Writes are guarded so motionless nodes don't dirty
-        // their Transform (and drag the subtree through propagation).
-        if motion.velocity != Vec3::ZERO {
-            transform.translation += motion.velocity * (EFFECT_FPS * dt);
-        }
-        if motion.rvel_deg.length_squared() > f32::EPSILON {
-            let rvel = motion.rvel_deg * (EFFECT_FPS * dt);
-            motion.base_rotation *= Quat::from_euler(
-                EulerRot::XYZ,
-                rvel.x.to_radians(),
-                rvel.y.to_radians(),
-                rvel.z.to_radians(),
-            );
-        }
-        if motion.spin_deg_vel != 0.0 {
-            motion.spin_deg += motion.spin_deg_vel * (EFFECT_FPS * dt);
-        }
-
-        // Billboarded plates get their rotation from the billboard system.
-        // Shape spin (SetShapeRot/Vel) is RENDER-ONLY in the original — a
-        // separate shape matrix multiplied at draw time (exe ctx+0x130),
-        // never part of the frame children/emitted particles inherit — so
-        // it only composes for nodes that render geometry themselves.
-        // Spinning an invisible emitter template would swing its attached
-        // particle chain around like a clock hand.
-        if billboard.is_none() {
-            let spin = if has_visual {
-                motion.spin()
-            } else {
-                Quat::IDENTITY
-            };
-            let rotation = motion.origin_rotation * motion.base_rotation * spin;
-            if transform.rotation != rotation {
-                transform.rotation = rotation;
+            if motion.rvel_deg.length_squared() > f32::EPSILON {
+                let rvel = motion.rvel_deg * (EFFECT_FPS * dt);
+                motion.base_rotation *= Quat::from_euler(
+                    EulerRot::XYZ,
+                    rvel.x.to_radians(),
+                    rvel.y.to_radians(),
+                    rvel.z.to_radians(),
+                );
             }
-        }
-    }
+            if motion.spin_deg_vel != 0.0 {
+                motion.spin_deg += motion.spin_deg_vel * (EFFECT_FPS * dt);
+            }
+
+            // Billboarded plates get their rotation from the billboard system.
+            // Shape spin (SetShapeRot/Vel) is RENDER-ONLY in the original — a
+            // separate shape matrix multiplied at draw time (exe ctx+0x130),
+            // never part of the frame children/emitted particles inherit — so
+            // it only composes for nodes that render geometry themselves.
+            // Spinning an invisible emitter template would swing its attached
+            // particle chain around like a clock hand.
+            if billboard.is_none() {
+                let spin = if has_visual {
+                    motion.spin()
+                } else {
+                    Quat::IDENTITY
+                };
+                let rotation = motion.origin_rotation * motion.base_rotation * spin;
+                if transform.rotation != rotation {
+                    transform.rotation = rotation;
+                }
+            }
+        },
+    );
 }
 
 /// Samples a SetBANRot matrix track, slerping between adjacent keys.
@@ -1118,40 +1128,45 @@ pub fn billboard_effect_nodes(
         return;
     };
 
-    for (mut transform, global, billboard, child_of, motion) in &mut plates {
-        let desired = match billboard.0 {
-            // Screen-aligned: quad +Z parallel to the camera view axis.
-            ViewMode::Billboard => camera.rotation(),
-            // SilkroadDoc JMXVEFF: ViewVBillboard is a "vertical billboard
-            // (rotates only around the Y-axis)" — i.e. a cylindrical billboard
-            // upright in world space, the same constraint as YBillboard, not a
-            // free screen-facing quad.
-            ViewMode::VBillboard | ViewMode::YBillboard => {
-                let mut dir = camera.translation() - global.translation();
-                dir.y = 0.0;
-                match dir.try_normalize() {
-                    Some(dir) => Quat::from_rotation_arc(Vec3::Z, dir),
-                    None => continue,
+    // Per-plate and independent (each reads the camera and its own parent),
+    // so it runs across the compute pool: single-threaded it was ~0.7 ms per
+    // frame with ~1,800 plates at a crowded spot (trace of 2026-10-02).
+    plates
+        .par_iter_mut()
+        .for_each(|(mut transform, global, billboard, child_of, motion)| {
+            let desired = match billboard.0 {
+                // Screen-aligned: quad +Z parallel to the camera view axis.
+                ViewMode::Billboard => camera.rotation(),
+                // SilkroadDoc JMXVEFF: ViewVBillboard is a "vertical billboard
+                // (rotates only around the Y-axis)" — i.e. a cylindrical billboard
+                // upright in world space, the same constraint as YBillboard, not a
+                // free screen-facing quad.
+                ViewMode::VBillboard | ViewMode::YBillboard => {
+                    let mut dir = camera.translation() - global.translation();
+                    dir.y = 0.0;
+                    match dir.try_normalize() {
+                        Some(dir) => Quat::from_rotation_arc(Vec3::Z, dir),
+                        None => return,
+                    }
                 }
-            }
-            ViewMode::None => continue,
-        };
-        let spin = motion.map(EffectMotion::spin).unwrap_or(Quat::IDENTITY);
+                ViewMode::None => return,
+            };
+            let spin = motion.map(EffectMotion::spin).unwrap_or(Quat::IDENTITY);
 
-        let parent_linear = parents
-            .get(child_of.parent())
-            .map(|p| bevy::math::Mat3::from(p.affine().matrix3))
-            .unwrap_or(Mat3::IDENTITY);
-        let Some(rotation) = aimed_local_rotation(parent_linear, desired) else {
-            continue;
-        };
-        // Exact equality suppresses idle change ticks without an angular tolerance
-        // that could discard slow spin or camera motion. All inputs still run.
-        let rotation = rotation * spin;
-        if transform.rotation != rotation {
-            transform.rotation = rotation;
-        }
-    }
+            let parent_linear = parents
+                .get(child_of.parent())
+                .map(|p| bevy::math::Mat3::from(p.affine().matrix3))
+                .unwrap_or(Mat3::IDENTITY);
+            let Some(rotation) = aimed_local_rotation(parent_linear, desired) else {
+                return;
+            };
+            // Exact equality suppresses idle change ticks without an angular tolerance
+            // that could discard slow spin or camera motion. All inputs still run.
+            let rotation = rotation * spin;
+            if transform.rotation != rotation {
+                transform.rotation = rotation;
+            }
+        });
 }
 
 /// The local rotation that makes an entity's world basis equal `desired`

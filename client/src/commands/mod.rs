@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use crate::assets::ban::{bone_target_id, JMXVBAN};
 use crate::plugins::config::graphics::ObjectLodSettings;
 use crate::plugins::config::ClientConfig;
-use crate::plugins::map::objects::{SroBindPoses, SroMeshes};
+use crate::plugins::map::objects::{
+    SroAnimationClips, SroBindPoses, SroMaterialVariants, SroMeshes, VariantSources,
+};
 use crate::plugins::map::terrain::{FOG_RANGE, REGION_SIZE, VISIBLE_RANGE};
 use bevy::asset::{AssetPath, AssetServer, Assets};
 use bevy::camera::visibility::VisibilityRange;
@@ -23,10 +25,7 @@ use bevy::prelude::{
 };
 
 use crate::assets::bms::mesh::JMXVBMS;
-use crate::assets::bmt::material::{
-    material_label, rim_material_label, sheen_cutout_material_label, sheen_material_label,
-    BmtMaterialDefaults,
-};
+use crate::assets::bmt::material::{material_label, BmtMaterialDefaults};
 use crate::assets::bmt::rim::SroRimMaterial;
 use crate::assets::bmt::sheen::SroSheenMaterial;
 use crate::assets::bsk::JMXVBSK;
@@ -309,6 +308,7 @@ impl Command for SpawnResource {
         // model would miss the cache and break dedup/batching.
         world.init_resource::<SroMeshes>();
         world.init_resource::<SroBindPoses>();
+        world.init_resource::<SroMaterialVariants>();
         world.resource_scope(|world, mesh_cache: Mut<SroMeshes>| {
             world.resource_scope(|world, bind_pose_cache: Mut<SroBindPoses>| {
                 world.resource_scope(|world, meshes: Mut<Assets<Mesh>>| {
@@ -340,6 +340,35 @@ impl SpawnResource {
         bind_pose_cache: &mut SroBindPoses,
         meshes: &mut Assets<Mesh>,
         inverse_bindposes: &mut Assets<SkinnedMeshInverseBindposes>,
+    ) {
+        // The clip cache is scoped here rather than by the callers, so
+        // `AttachResource` (which holds the scopes above) gets it too.
+        world.init_resource::<SroAnimationClips>();
+        world.resource_scope(|world, clip_cache: Mut<SroAnimationClips>| {
+            world.resource_scope(|world, clips: Mut<Assets<AnimationClip>>| {
+                self.spawn_with_caches(
+                    world,
+                    mesh_cache,
+                    bind_pose_cache,
+                    meshes,
+                    inverse_bindposes,
+                    clip_cache.into_inner(),
+                    clips.into_inner(),
+                );
+            });
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_with_caches(
+        self,
+        world: &mut World,
+        mesh_cache: &mut SroMeshes,
+        bind_pose_cache: &mut SroBindPoses,
+        meshes: &mut Assets<Mesh>,
+        inverse_bindposes: &mut Assets<SkinnedMeshInverseBindposes>,
+        clip_cache: &mut SroAnimationClips,
+        clips: &mut Assets<AnimationClip>,
     ) {
         // The owning entity (the item/monster carrying `UnloadedResource`) can
         // despawn while its resource loads asynchronously — common with the
@@ -433,7 +462,7 @@ impl SpawnResource {
 
         let asset_server = world.resource::<AssetServer>();
         let (bind_poses, bones, animations) =
-            match Self::prepare_skeleton(resource, bsk_assets, ban_assets, asset_server) {
+            match Self::prepare_skeleton(resource, bsk_assets, ban_assets, clip_cache, clips) {
                 Some(value) => value,
                 None => return,
             };
@@ -470,11 +499,19 @@ impl SpawnResource {
             .get_resource::<ClientConfig>()
             .map(|config| config.graphics.objects.clone())
             .unwrap_or_default();
+        // `material_set_path` came from this handle, so it is always `Some` here
+        let Some(material_set) = material_handle else {
+            return;
+        };
+        let variant_sources = VariantSources::from_world(world);
+        let variants = world.get_resource::<SroMaterialVariants>();
         let mesh_groups = PreparedMeshGroups::prepare(
             asset_server,
             resource,
             bms_assets,
+            material_set,
             material_set_path,
+            variants.zip(variant_sources.as_ref()),
             &bind_poses,
             has_skeleton,
             self.reverse_winding,
@@ -732,7 +769,8 @@ impl SpawnResource {
         resource: &SroResource,
         bsk_assets: &Assets<JMXVBSK>,
         ban_assets: &Assets<JMXVBAN>,
-        asset_server: &AssetServer,
+        clip_cache: &mut SroAnimationClips,
+        clips: &mut Assets<AnimationClip>,
     ) -> Option<(
         HashMap<String, Mat4>,
         Vec<(Transform, String, String)>,
@@ -788,10 +826,13 @@ impl SpawnResource {
                 }
 
                 for animation in &resource.animation.animations {
-                    animations.push(ban_assets.get(animation).map(|animation| {
-                        let clip =
-                            animation.to_animation_clip(skeleton, &resource.object_info.name);
-                        asset_server.add(clip)
+                    animations.push(ban_assets.get(animation).map(|ban| {
+                        clip_cache.get_or_build(
+                            clips,
+                            (animation.id(), ban),
+                            (skeleton_handle.id(), skeleton),
+                            &resource.object_info.name,
+                        )
                     }));
                 }
             } else {
@@ -816,10 +857,8 @@ impl SpawnResource {
     /// `skeleton` keys the bind-pose cache: the skeleton `bind_poses` came
     /// from — the resource's own, or the wearing character's for clothes.
     fn prepare_mesh_groups<M: Material>(
-        asset_server: &AssetServer,
         resource: &SroResource,
         bms_assets: &Assets<JMXVBMS>,
-        material_set_path: &AssetPath,
         bind_poses: &HashMap<String, Mat4>,
         use_skinning: bool,
         reverse_winding: bool,
@@ -829,7 +868,7 @@ impl SpawnResource {
         meshes: &mut Assets<Mesh>,
         inverse_bindposes: &mut Assets<SkinnedMeshInverseBindposes>,
         lod: &ObjectLodSettings,
-        material_label: impl Fn(&str) -> String,
+        material_for: impl Fn(&str) -> Handle<M>,
     ) -> Vec<(Name, Vec<MeshPartBundle<M>>)> {
         // Skill-object resources (the skilleffect.txt arrows —
         // cha_arrow_normal/_critical/_fire/…) list their meshes but carry
@@ -875,10 +914,7 @@ impl SpawnResource {
                     Vec::new()
                 };
 
-                let material: Handle<M> = asset_server.load(material_asset_path(
-                    material_set_path,
-                    material_label(&mesh.material),
-                ));
+                let material: Handle<M> = material_for(&mesh.material);
                 // Weak cache: resolve the cached id to a fresh strong handle;
                 // a dead id (last using entity despawned, asset freed) falls
                 // through to a rebuild. See `SroMeshes`.
@@ -1154,12 +1190,17 @@ enum PreparedMeshGroups {
 }
 
 impl PreparedMeshGroups {
+    /// `variants` resolves the rim/sheen variants (built on demand, see
+    /// [`SroMaterialVariants`]); `None` only in apps without the client's
+    /// material plugins, where those resources fall back to the plain material.
     #[allow(clippy::too_many_arguments)]
     fn prepare(
         asset_server: &AssetServer,
         resource: &SroResource,
         bms_assets: &Assets<JMXVBMS>,
+        material_set: &Handle<JMXVBMT>,
         material_set_path: &AssetPath,
+        variants: Option<(&SroMaterialVariants, &VariantSources)>,
         bind_poses: &HashMap<String, Mat4>,
         use_skinning: bool,
         reverse_winding: bool,
@@ -1169,23 +1210,33 @@ impl PreparedMeshGroups {
         meshes: &mut Assets<Mesh>,
         inverse_bindposes: &mut Assets<SkinnedMeshInverseBindposes>,
         lod: &ObjectLodSettings,
-        // pick the `.rim` sub-asset (always-on character rim) over the plain
-        // Masked material; only valid when the loader built it (rim enabled)
+        // pick the rim variant (always-on character rim) over the plain
+        // Masked material; only valid while rim is enabled
         rim: bool,
     ) -> Self {
-        if resource.alpha_is_sheen {
-            // resources with the EnvMap alpha-test flag additionally cut
-            // out exact-zero alpha texels (see SroResource::sheen_alpha_test)
-            let label: fn(&str) -> String = if resource.sheen_alpha_test {
-                sheen_cutout_material_label
-            } else {
-                sheen_material_label
-            };
-            Self::Sheen(SpawnResource::prepare_mesh_groups(
-                asset_server,
+        match variants {
+            Some((variants, sources)) if resource.alpha_is_sheen => {
+                // resources with the EnvMap alpha-test flag additionally cut
+                // out exact-zero alpha texels (see SroResource::sheen_alpha_test)
+                let cutout = resource.sheen_alpha_test;
+                Self::Sheen(SpawnResource::prepare_mesh_groups(
+                    resource,
+                    bms_assets,
+                    bind_poses,
+                    use_skinning,
+                    reverse_winding,
+                    skeleton,
+                    mesh_cache,
+                    bind_pose_cache,
+                    meshes,
+                    inverse_bindposes,
+                    lod,
+                    |material| variants.sheen(sources, material_set, material, cutout),
+                ))
+            }
+            Some((variants, sources)) if rim => Self::Rim(SpawnResource::prepare_mesh_groups(
                 resource,
                 bms_assets,
-                material_set_path,
                 bind_poses,
                 use_skinning,
                 reverse_winding,
@@ -1195,14 +1246,11 @@ impl PreparedMeshGroups {
                 meshes,
                 inverse_bindposes,
                 lod,
-                |material_name| label(material_name),
-            ))
-        } else if rim {
-            Self::Rim(SpawnResource::prepare_mesh_groups(
-                asset_server,
+                |material| variants.rim(sources, material_set, material),
+            )),
+            _ => Self::Standard(SpawnResource::prepare_mesh_groups(
                 resource,
                 bms_assets,
-                material_set_path,
                 bind_poses,
                 use_skinning,
                 reverse_winding,
@@ -1212,25 +1260,13 @@ impl PreparedMeshGroups {
                 meshes,
                 inverse_bindposes,
                 lod,
-                rim_material_label,
-            ))
-        } else {
-            Self::Standard(SpawnResource::prepare_mesh_groups(
-                asset_server,
-                resource,
-                bms_assets,
-                material_set_path,
-                bind_poses,
-                use_skinning,
-                reverse_winding,
-                skeleton,
-                mesh_cache,
-                bind_pose_cache,
-                meshes,
-                inverse_bindposes,
-                lod,
-                material_label,
-            ))
+                |material| {
+                    asset_server.load(material_asset_path(
+                        material_set_path,
+                        material_label(material),
+                    ))
+                },
+            )),
         }
     }
 

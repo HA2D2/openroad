@@ -676,10 +676,10 @@ impl Default for SheenGraphicsSettings {
 }
 
 impl GraphicsSettings {
-    /// The config-derived material bases the `.bmt` loader builds its
-    /// labeled sub-assets from (inserted as [`BmtMaterialDefaults`] before
-    /// the asset plugins register — the loader itself can't see config
-    /// types; the parser-only lib target has no `plugins` module).
+    /// The config-derived settings the rim/sheen material variants are built
+    /// from (inserted as [`BmtMaterialDefaults`] at startup and read by the
+    /// spawn path's `SroMaterialVariants` — the asset code itself can't see
+    /// config types; the parser-only lib target has no `plugins` module).
     ///
     /// [`BmtMaterialDefaults`]: crate::assets::bmt::material::BmtMaterialDefaults
     pub fn to_material_defaults(&self) -> crate::assets::bmt::material::BmtMaterialDefaults {

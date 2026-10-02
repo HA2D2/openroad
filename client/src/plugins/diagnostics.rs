@@ -3,13 +3,15 @@ use crate::assets::o2::MapObject;
 use crate::commands::{Bone, MeshGroup, SpawnedFromResource};
 use crate::plugins::animation_culling::PausedAnimationGraph;
 use crate::plugins::camera::CameraLayers;
+use crate::plugins::dynamic_resource_loader::UnloadedResource;
 use crate::plugins::effects::spawn::{EffectMaterials, EffectMeshes};
 use crate::plugins::effects::{
     EffectInstance, EffectNode, EffectSimPaused, EmittedBy, PooledParticle,
 };
 use crate::plugins::map::foliage::FoliageBlock;
 use crate::plugins::map::objects::{
-    CompoundPart, LoadingCompound, LoadingResources, SpawnedMapObjects, SroBindPoses, SroMeshes,
+    CompoundPart, LoadingCompound, LoadingResources, SpawnedMapObjects, SroAnimationClips,
+    SroBindPoses, SroMaterialVariants, SroMeshes,
 };
 use crate::plugins::map::terrain::{TerrainLoadState, WaterPlane};
 use crate::GameState;
@@ -86,6 +88,10 @@ pub const PAUSED_EFFECT_COUNT: DiagnosticPath =
     DiagnosticPath::const_new("world_counts/paused_effects");
 pub const TERRAIN_BUILDING_COUNT: DiagnosticPath =
     DiagnosticPath::const_new("world_counts/terrain_building");
+/// Characters, NPCs and map objects waiting to spawn: still loading, or loaded
+/// and parked behind `RESOURCE_SPAWNS_PER_FRAME` (`dynamic_resource_loader`).
+pub const UNSPAWNED_RESOURCE_COUNT: DiagnosticPath =
+    DiagnosticPath::const_new("world_counts/unspawned_resources");
 
 // Sizes of the dedup/registry HashMaps (mesh, bind-pose, material and
 // map-object caches). Growth that never plateaus while revisiting the same
@@ -120,6 +126,13 @@ pub const FRAME_TIME_STUTTER_RATE: DiagnosticPath =
 pub const SRO_MESH_CACHE: DiagnosticPath = DiagnosticPath::const_new("cache_counts/sro_meshes");
 pub const SRO_BIND_POSE_CACHE: DiagnosticPath =
     DiagnosticPath::const_new("cache_counts/sro_bind_poses");
+pub const SRO_ANIMATION_CLIP_CACHE: DiagnosticPath =
+    DiagnosticPath::const_new("cache_counts/sro_animation_clips");
+pub const SRO_MATERIAL_VARIANT_CACHE: DiagnosticPath =
+    DiagnosticPath::const_new("cache_counts/sro_material_variants");
+/// Released assets kept loaded for a grace period (`asset_residency`).
+pub const RESIDENT_ASSET_CACHE: DiagnosticPath =
+    DiagnosticPath::const_new("cache_counts/resident_assets");
 pub const SPAWNED_MAP_OBJECT_CACHE: DiagnosticPath =
     DiagnosticPath::const_new("cache_counts/spawned_map_objects");
 pub const EFFECT_MESH_CACHE: DiagnosticPath =
@@ -153,6 +166,13 @@ impl Plugin for DiagnosticsPlugin {
             )
             .register_diagnostic(Diagnostic::new(SRO_MESH_CACHE).with_smoothing_factor(0.0))
             .register_diagnostic(Diagnostic::new(SRO_BIND_POSE_CACHE).with_smoothing_factor(0.0))
+            .register_diagnostic(
+                Diagnostic::new(SRO_ANIMATION_CLIP_CACHE).with_smoothing_factor(0.0),
+            )
+            .register_diagnostic(
+                Diagnostic::new(SRO_MATERIAL_VARIANT_CACHE).with_smoothing_factor(0.0),
+            )
+            .register_diagnostic(Diagnostic::new(RESIDENT_ASSET_CACHE).with_smoothing_factor(0.0))
             .register_diagnostic(
                 Diagnostic::new(SPAWNED_MAP_OBJECT_CACHE).with_smoothing_factor(0.0),
             )
@@ -207,6 +227,7 @@ impl Plugin for DiagnosticsPlugin {
         track::<LoadingResources>(app, LOADING_RESOURCES_COUNT);
         track::<PausedAnimationGraph>(app, PAUSED_ANIMATION_COUNT);
         track::<EffectSimPaused>(app, PAUSED_EFFECT_COUNT);
+        track::<UnloadedResource>(app, UNSPAWNED_RESOURCE_COUNT);
     }
 }
 
@@ -400,9 +421,21 @@ fn cache_count_system(
     spawned_map_objects: Option<Res<SpawnedMapObjects>>,
     effect_meshes: Option<Res<EffectMeshes>>,
     effect_materials: Option<Res<EffectMaterials>>,
+    sro_animation_clips: Option<Res<SroAnimationClips>>,
+    sro_material_variants: Option<Res<SroMaterialVariants>>,
+    resident_assets: Option<Res<crate::plugins::asset_residency::AssetResidency>>,
 ) {
+    if let Some(cache) = resident_assets {
+        diagnostics.add_measurement(&RESIDENT_ASSET_CACHE, || cache.len() as f64);
+    }
+    if let Some(cache) = sro_material_variants {
+        diagnostics.add_measurement(&SRO_MATERIAL_VARIANT_CACHE, || cache.len() as f64);
+    }
     if let Some(cache) = sro_meshes {
         diagnostics.add_measurement(&SRO_MESH_CACHE, || cache.0.len() as f64);
+    }
+    if let Some(cache) = sro_animation_clips {
+        diagnostics.add_measurement(&SRO_ANIMATION_CLIP_CACHE, || cache.0.len() as f64);
     }
     if let Some(cache) = sro_bind_poses {
         diagnostics.add_measurement(&SRO_BIND_POSE_CACHE, || cache.0.len() as f64);
