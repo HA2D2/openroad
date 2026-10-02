@@ -3,9 +3,12 @@ use std::collections::HashSet;
 
 use bevy::asset::{Assets, RenderAssetUsages};
 use bevy::prelude::{
-    error, info, not, resource_exists, warn, App, AssetServer, Commands, Component, DetectChanges,
-    Handle, Image, IntoScheduleConfigs, Plugin, PreUpdate, Res, ResMut, Resource, Startup, Update,
+    error, info, not, resource_exists, warn, App, AssetServer, Commands, DetectChanges, Handle,
+    Image, IntoScheduleConfigs, Plugin, PreUpdate, Res, ResMut, Resource, Startup, Update,
 };
+// only the hand-rolled pipeline's ground textures are a plain component
+#[cfg(feature = "terrain_hand_rolled_pipeline")]
+use bevy::prelude::Component;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_resource::{
     Buffer, BufferInitDescriptor, BufferUsages, Extent3d, TextureDimension, TextureFormat,

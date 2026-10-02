@@ -1,21 +1,15 @@
 use bevy::app::App;
 use bevy::dev_tools::fps_overlay::FpsOverlayPlugin;
-use bevy::pbr::wireframe::{WireframeConfig, WireframePlugin};
+use bevy::pbr::wireframe::WireframeConfig;
 use bevy::prelude::*;
 use bevy::ui::UiTargetCamera;
 // use bevy_prototype_debug_lines::DebugLinesPlugin;
 use crate::plugins::config::ClientConfig;
 use crate::AppMode;
 
-use crate::plugins::dev::aabb_lines::draw_debug_lines_for_aabb;
 use crate::plugins::dev::fps_graph::FpsGraphPlugin;
 use crate::plugins::dev::glass_ball::GlassballPlugin;
 use crate::plugins::dev::lighting::LightingPlugin;
-use crate::plugins::dev::navmesh_lines::{
-    draw_debug_lines_for_nav_mesh, draw_nav_cursor_hit, draw_nav_location,
-    draw_object_global_edges, draw_object_nav_meshes, dump_nav_snapshot, log_nav_diagnostics,
-    warn_when_inside_solid_ground,
-};
 use crate::plugins::dev::player_config::PlayerConfigPlugin;
 use crate::plugins::dev::render_debug::{RenderControlsInspectorPlugin, RenderControlsPlugin};
 use crate::plugins::dev::teleport::TeleportPlugin;
