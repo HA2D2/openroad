@@ -991,12 +991,14 @@ pub fn sample_graphs(
                         visual.last_argb = argb;
                     }
                 }
-                if let (Some(uv_source), Some(uv_material)) =
-                    (&cache.uv, visual.uv_material.clone())
-                {
+                // Instanced nodes read `last_uv` straight into their instance;
+                // only material-path nodes (trails) need the uniform write.
+                if let Some(uv_source) = &cache.uv {
                     if let Some(uv) = sample_texture_slide(uv_source, node_data, node.age) {
                         if uv.distance_squared(visual.last_uv) > 1e-8 {
-                            uv_writes.borrow_local_mut().push((uv_material, uv));
+                            if let Some(uv_material) = visual.uv_material.clone() {
+                                uv_writes.borrow_local_mut().push((uv_material, uv));
+                            }
                             visual.last_uv = uv;
                         }
                     }
