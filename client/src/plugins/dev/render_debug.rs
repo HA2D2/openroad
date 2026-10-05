@@ -17,7 +17,6 @@ use crate::plugins::effects::{
     EffectsEnabled, LeafEmitPolicy,
 };
 use crate::plugins::map::terrain::rendering;
-use bevy::pbr::MeshMaterial3d;
 
 /// The effect-runtime knobs `on_settings_changed` drives, bundled to stay
 /// under the system-parameter arity limit.
@@ -391,7 +390,7 @@ fn on_settings_changed(
     // TerrainGroundTextures::backface_culling exists per-region but nothing here live-toggles
     // it): this system is already at Bevy's 16-parameter ceiling, so adding the query that would
     // need needs its own pass rather than swapping this param's type in place.
-    #[cfg(not(feature = "terrain_hand_rolled_pipeline"))] mut terrain_materials: ResMut<
+    mut terrain_materials: ResMut<
         Assets<crate::assets::m::block_splat_material::TerrainBlockSplatMaterial>,
     >,
     camera_query: Query<Entity, With<Camera>>,
@@ -488,7 +487,6 @@ fn on_settings_changed(
                 None
             };
         }
-        #[cfg(not(feature = "terrain_hand_rolled_pipeline"))]
         for (_, material) in terrain_materials.iter_mut() {
             material.backface_culling = settings.backface_culling;
         }

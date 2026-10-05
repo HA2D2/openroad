@@ -225,7 +225,9 @@ mod test {
     #[test]
     fn no_plugin_group_exceeds_the_tuple_arity_bevy_implements() {
         const MAX_PLUGIN_TUPLE: usize = 15;
-        let text = registry();
+        // The patterns below are `\n`-based; a Windows checkout with
+        // `core.autocrlf` hands `include_str!` `\r\n` endings.
+        let text = registry().replace("\r\n", "\n");
         let start = text
             .find("app.add_plugins((")
             .expect("the registry call moved");
