@@ -57,6 +57,28 @@ enum AppMode {
     DebugMode,
 }
 
+/// The render plugin, by default exactly Bevy's. `OPENROAD_GPU_BASELINE=1` instead requests only
+/// what a ~2014 desktop GPU guarantees — WebGPU-baseline limits, no optional features except BC
+/// texture compression (every D3D10+-class GPU has it, and every DDJ texture is BC) — so features
+/// the client would need beyond old hardware show up as validation errors on a current machine.
+/// `WGPU_SETTINGS_PRIO=webgpu` alone also drops BC, which no real old PC lacks.
+fn gpu_baseline_render_plugin() -> bevy::render::RenderPlugin {
+    use bevy::render::settings::{WgpuFeatures, WgpuSettings, WgpuSettingsPriority};
+    if env::var("OPENROAD_GPU_BASELINE").is_ok_and(|v| v == "1") {
+        bevy::render::RenderPlugin {
+            render_creation: WgpuSettings {
+                priority: WgpuSettingsPriority::WebGPU,
+                features: WgpuFeatures::TEXTURE_COMPRESSION_BC,
+                ..default()
+            }
+            .into(),
+            ..default()
+        }
+    } else {
+        bevy::render::RenderPlugin::default()
+    }
+}
+
 fn main() {
     let working_dir = env::current_dir().unwrap();
     let mut assets_dir = working_dir.clone();
@@ -120,6 +142,7 @@ fn main() {
                     watch_for_changes_override: Some(cfg!(debug_assertions)),
                     ..default()
                 })
+                .set(gpu_baseline_render_plugin())
                 .set(ImagePlugin {
                     default_sampler: ImageSamplerDescriptor {
                         min_filter: ImageFilterMode::Linear,
