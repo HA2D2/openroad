@@ -105,7 +105,9 @@ impl SpecializedMeshPipeline for TerrainShadowPipeline {
     ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
         let mesh_key = key.mesh_key;
         let mut shader_defs = vec![
-            "TERRAIN_HAND_ROLLED_PIPELINE".into(),
+            // the shader's fragment-only bindings must still preprocess; the vertex stage
+            // used here reads none of them
+            bevy::shader::ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), 3),
             "VERTEX_OUTPUT_INSTANCE_INDEX".into(),
         ];
         // Position only — mirrors PrepassPipeline::specialize's own depth-only

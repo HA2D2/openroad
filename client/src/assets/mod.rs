@@ -61,6 +61,7 @@ pub mod o;
 pub mod o2;
 pub mod resinfo;
 pub mod t;
+pub mod tile_layers;
 pub mod tile_tint;
 pub mod twodt;
 

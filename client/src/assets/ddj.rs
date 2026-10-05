@@ -88,6 +88,21 @@ impl TryFrom<&mut Bytes> for JMXVDDJ {
 }
 
 impl JMXVDDJ {
+    /// This texture as one normalized layer of the terrain tile arrays
+    /// (`assets::tile_layers`), or `None` if it is not a BC1 texture of a
+    /// shape a layer can hold.
+    pub fn tile_layer(&self) -> Option<Vec<u8>> {
+        if self.dds.get_d3d_format() != Some(D3DFormat::DXT1) {
+            return None;
+        }
+        crate::assets::tile_layers::normalize_bc1_tile(
+            self.dds.header.width,
+            self.dds.header.height,
+            self.dds.get_num_mipmap_levels(),
+            &self.dds.data,
+        )
+    }
+
     /// `srgb` = treat the pixel data as sRGB-encoded color (the default for
     /// albedo/diffuse textures). Pass `false` for non-color intensity maps
     /// (the sheen chrome probe, the +N enhancement streak): sampling those
@@ -934,14 +949,19 @@ pub struct DdjSettings {
 #[derive(bevy::reflect::TypePath)]
 pub struct DDJLoader {
     tile_tints: crate::assets::tile_tint::TerrainTileTints,
+    tile_layers: crate::assets::tile_layers::TerrainTileLayers,
 }
 
 impl bevy::prelude::FromWorld for DDJLoader {
     fn from_world(world: &mut bevy::prelude::World) -> Self {
         world.init_resource::<crate::assets::tile_tint::TerrainTileTints>();
+        world.init_resource::<crate::assets::tile_layers::TerrainTileLayers>();
         Self {
             tile_tints: world
                 .resource::<crate::assets::tile_tint::TerrainTileTints>()
+                .clone(),
+            tile_layers: world
+                .resource::<crate::assets::tile_layers::TerrainTileLayers>()
                 .clone(),
         }
     }
@@ -994,6 +1014,22 @@ impl AssetLoader for DDJLoader {
                     ddj_file.dds.get_d3d_format(),
                     load_context.path().path().display()
                 );
+            }
+        }
+        // Ground tiles also become one layer of the terrain tile arrays
+        // (`assets::tile_layers`), normalized here while the bytes are still
+        // ours; the arrays are built once every tile has reported.
+        if ddj_file.is_terrain_texture {
+            let path = load_context.path().clone_owned();
+            match ddj_file.tile_layer() {
+                Some(layer) => {
+                    self.tile_layers
+                        .0
+                        .write()
+                        .unwrap()
+                        .insert(path, std::sync::Arc::new(layer));
+                }
+                None => warn!("ddj: {path}: ground tile cannot become a texture-array layer"),
             }
         }
         match ddj_file.to_image(!settings.non_color) {

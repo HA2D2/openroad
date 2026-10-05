@@ -1,7 +1,6 @@
 //! Hand-rolled render pipeline for terrain ground, replacing `Material`/`MaterialPlugin` so the
-//! tile atlas can be bound exactly once, globally, instead of once per region (see
-//! `client::assets::m::block_splat_material`'s `REGION_TILE_SLOT_COUNT` doc comment for why
-//! `Material` can't do this — its draw-command chain is fixed by a blanket impl inside `bevy_pbr`
+//! ground-tile arrays and shared buffers can be bound exactly once, globally, instead of once per
+//! region (`Material` can't do this — its draw-command chain is fixed by a blanket impl inside `bevy_pbr`
 //! with no supported extension point for a fourth, globally-bound bind group). Opt-in via
 //! `graphics.terrain.pipeline: hand_rolled` (restart; registered by `MapPlugin`); the default
 //! keeps using `TerrainBlockSplatMaterial`/`MaterialPlugin`.
@@ -34,7 +33,6 @@
 //! to guarantee two regions never collide into the same batch set.
 
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 
 use bevy::asset::AssetServer;
 use bevy::core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey};
@@ -54,14 +52,16 @@ use bevy::render::render_phase::*;
 use bevy::render::render_resource::*;
 use bevy::render::renderer::RenderDevice;
 use bevy::render::sync_world::{MainEntity, MainEntityHashMap, MainEntityHashSet};
-use bevy::render::texture::{FallbackImage, GpuImage};
+use bevy::render::texture::GpuImage;
 use bevy::render::view::{ExtractedView, RenderVisibleEntities, RetainedViewEntity};
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 
 use crate::assets::m::block_splat_material::{
-    TerrainAmbientRatioBuffer, TerrainGroundTextures, TerrainRenderParamsBuffer, TerrainTileAtlas,
-    TILE_SLOT_COUNT,
+    terrain_bind_group_entries, tile_array_views, tile_sampler_descriptor,
+    TerrainAmbientRatioBuffer, TerrainBindings, TerrainBlockSplatMaterial, TerrainGroundTextures,
+    TerrainRenderParamsBuffer,
 };
+use crate::assets::m::tile_arrays::TerrainTileArrays;
 
 mod shadow;
 use shadow::{
@@ -83,7 +83,6 @@ impl Plugin for TerrainRenderPipelinePlugin {
             .init_resource::<QueuedTerrain<Opaque3d>>()
             .init_resource::<QueuedTerrain<Shadow>>()
             .init_resource::<TerrainRegionBindGroups>()
-            .init_resource::<TerrainGlobalBindGroup>()
             .init_resource::<SpecializedMeshPipelines<TerrainShadowPipeline>>()
             .init_resource::<SpecializedTerrainShadowPipelineCache>()
             .add_render_command::<Opaque3d, DrawTerrainOpaque>()
@@ -111,9 +110,6 @@ impl Plugin for TerrainRenderPipelinePlugin {
                         .in_set(RenderSystems::Specialize)
                         .after(bevy::render::render_asset::prepare_assets::<RenderMesh>),
                     prepare_terrain_region_bind_groups
-                        .in_set(RenderSystems::PrepareBindGroups)
-                        .after(bevy::render::render_asset::prepare_assets::<GpuImage>),
-                    prepare_terrain_global_bind_group
                         .in_set(RenderSystems::PrepareBindGroups)
                         .after(bevy::render::render_asset::prepare_assets::<GpuImage>),
                     queue_terrain_opaque.in_set(RenderSystems::QueueMeshes),
@@ -151,9 +147,7 @@ fn extract_terrain_ground_textures(
 // Pipeline
 // ---------------------------------------------------------------------------
 
-/// Samplers used by the global bind group — created once, not recreated on every prepare (unlike
-/// the `Material`-based path's `as_bind_group`, which the file's own doc comment on
-/// `TerrainAmbientRatio` documents as leaking a fresh pair every re-prepare).
+/// Samplers shared by every region's bind group — created once, not recreated on every prepare.
 #[derive(Resource)]
 struct TerrainSamplers {
     clamp: Sampler,
@@ -167,30 +161,24 @@ fn init_terrain_samplers(mut commands: Commands, render_device: Res<RenderDevice
         mipmap_filter: MipmapFilterMode::Linear,
         ..default()
     });
-    let tile = render_device.create_sampler(&SamplerDescriptor {
-        min_filter: FilterMode::Linear,
-        mag_filter: FilterMode::Linear,
-        mipmap_filter: MipmapFilterMode::Linear,
-        address_mode_u: AddressMode::Repeat,
-        address_mode_v: AddressMode::Repeat,
-        address_mode_w: AddressMode::Repeat,
-        anisotropy_clamp: 4,
-        ..default()
-    });
+    let tile = render_device.create_sampler(&tile_sampler_descriptor());
     commands.insert_resource(TerrainSamplers { clamp, tile });
 }
 
 /// Mirrors `Wireframe3dPipeline` (`bevy_pbr::wireframe`): a cloned `MeshPipeline` plus the
-/// terrain-specific shader handle and the two new `BindGroupLayout`s/descriptors.
+/// terrain-specific shader handle and the per-region `BindGroupLayout`/descriptor.
 #[derive(Resource, Clone)]
 pub struct TerrainPipeline {
     mesh_pipeline: MeshPipeline,
     shader: Handle<Shader>,
     region_bind_group_layout: BindGroupLayout,
     region_bind_group_layout_descriptor: BindGroupLayoutDescriptor,
-    global_bind_group_layout: BindGroupLayout,
-    global_bind_group_layout_descriptor: BindGroupLayoutDescriptor,
 }
+
+/// The terrain bind group's slot, after the view (0), view binding-array (1) and mesh (2) groups.
+/// Four groups in all — the baseline `max_bind_groups` (an earlier fifth, globally shared group
+/// for the tile atlas exceeded it on older GPUs).
+const TERRAIN_BIND_GROUP: u32 = 3;
 
 fn init_terrain_pipeline(
     mut commands: Commands,
@@ -198,91 +186,20 @@ fn init_terrain_pipeline(
     asset_server: Res<AssetServer>,
     render_device: Res<RenderDevice>,
 ) {
-    // Group 3 (per-region): the two textures genuinely unique per region.
-    let region_entries = vec![
-        BindGroupLayoutEntry {
-            binding: 0,
-            visibility: ShaderStages::FRAGMENT,
-            ty: BindingType::Texture {
-                multisampled: false,
-                sample_type: TextureSampleType::Uint,
-                view_dimension: TextureViewDimension::D2,
-            },
-            count: None,
-        },
-        BindGroupLayoutEntry {
-            binding: 1,
-            visibility: ShaderStages::FRAGMENT,
-            ty: BindingType::Texture {
-                multisampled: false,
-                sample_type: TextureSampleType::Float { filterable: true },
-                view_dimension: TextureViewDimension::D2,
-            },
-            count: None,
-        },
-    ];
+    // The same layout the `Material` path's material bind group uses, so the shader's bindings
+    // are identical on both paths.
+    let region_entries =
+        TerrainBlockSplatMaterial::bind_group_layout_entries(&render_device, false);
     let region_bind_group_layout =
         render_device.create_bind_group_layout("terrain_region_bind_group_layout", &region_entries);
     let region_bind_group_layout_descriptor =
         BindGroupLayoutDescriptor::new("terrain_region_bind_group_layout", &region_entries);
-
-    // Group 4 (global): bound exactly once, shared by every terrain region's draw.
-    let global_entries = vec![
-        BindGroupLayoutEntry {
-            binding: 0,
-            visibility: ShaderStages::FRAGMENT,
-            ty: BindingType::Sampler(SamplerBindingType::Filtering),
-            count: None,
-        },
-        BindGroupLayoutEntry {
-            binding: 1,
-            visibility: ShaderStages::FRAGMENT,
-            ty: BindingType::Texture {
-                multisampled: false,
-                sample_type: TextureSampleType::Float { filterable: true },
-                view_dimension: TextureViewDimension::D2,
-            },
-            count: NonZeroU32::new(TILE_SLOT_COUNT),
-        },
-        BindGroupLayoutEntry {
-            binding: 2,
-            visibility: ShaderStages::FRAGMENT,
-            ty: BindingType::Sampler(SamplerBindingType::Filtering),
-            count: None,
-        },
-        BindGroupLayoutEntry {
-            binding: 3,
-            visibility: ShaderStages::FRAGMENT,
-            ty: BindingType::Buffer {
-                ty: BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        },
-        BindGroupLayoutEntry {
-            binding: 4,
-            visibility: ShaderStages::FRAGMENT,
-            ty: BindingType::Buffer {
-                ty: BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        },
-    ];
-    let global_bind_group_layout =
-        render_device.create_bind_group_layout("terrain_global_bind_group_layout", &global_entries);
-    let global_bind_group_layout_descriptor =
-        BindGroupLayoutDescriptor::new("terrain_global_bind_group_layout", &global_entries);
 
     commands.insert_resource(TerrainPipeline {
         mesh_pipeline: mesh_pipeline.clone(),
         shader: asset_server.load("shaders/terrain_splat.wgsl"),
         region_bind_group_layout,
         region_bind_group_layout_descriptor,
-        global_bind_group_layout,
-        global_bind_group_layout_descriptor,
     });
 }
 
@@ -303,23 +220,18 @@ impl SpecializedMeshPipeline for TerrainPipeline {
         let mut descriptor = self.mesh_pipeline.specialize(key.mesh_key, layout)?;
         descriptor.label = Some("terrain_opaque_pipeline".into());
         descriptor.vertex.shader = self.shader.clone();
-        descriptor
-            .vertex
-            .shader_defs
-            .push("TERRAIN_HAND_ROLLED_PIPELINE".into());
+        // what Bevy's material pipeline defines for the material group
+        let group =
+            bevy::shader::ShaderDefVal::UInt("MATERIAL_BIND_GROUP".into(), TERRAIN_BIND_GROUP);
+        descriptor.vertex.shader_defs.push(group.clone());
         if let Some(fragment) = descriptor.fragment.as_mut() {
             fragment.shader = self.shader.clone();
-            fragment
-                .shader_defs
-                .push("TERRAIN_HAND_ROLLED_PIPELINE".into());
+            fragment.shader_defs.push(group);
         }
         descriptor.primitive.cull_mode = key.backface_culling.then_some(Face::Back);
         descriptor
             .layout
             .push(self.region_bind_group_layout_descriptor.clone());
-        descriptor
-            .layout
-            .push(self.global_bind_group_layout_descriptor.clone());
         Ok(descriptor)
     }
 }
@@ -328,116 +240,43 @@ impl SpecializedMeshPipeline for TerrainPipeline {
 // Bind groups
 // ---------------------------------------------------------------------------
 
-/// Built once (well: rebuilt only while the atlas's images are still uploading — see
-/// `prepare_terrain_global_bind_group`), then reused for the rest of the session. This is the
-/// whole point of the hand-rolled pipeline: one bind group instead of one per region.
+/// Per-region bind groups, keyed by `MainEntity` — same reasoning as
+/// `RenderTerrainGroundTextures` above. Each holds the region's own `tile_map` + `lightmap` and
+/// the shared tile arrays, samplers and buffers (cheap to reference from every region).
 #[derive(Resource, Default)]
-pub(crate) struct TerrainGlobalBindGroup(Option<BindGroup>);
+pub(crate) struct TerrainRegionBindGroups(MainEntityHashMap<BindGroup>);
 
-fn prepare_terrain_global_bind_group(
-    mut global: ResMut<TerrainGlobalBindGroup>,
+#[allow(clippy::too_many_arguments)]
+fn prepare_terrain_region_bind_groups(
+    mut bind_groups: ResMut<TerrainRegionBindGroups>,
     pipeline: Option<Res<TerrainPipeline>>,
     samplers: Option<Res<TerrainSamplers>>,
-    tile_atlas: Option<Res<TerrainTileAtlas>>,
+    tile_arrays: Option<Res<TerrainTileArrays>>,
     ambient_buffer: Option<Res<TerrainAmbientRatioBuffer>>,
     params_buffer: Option<Res<TerrainRenderParamsBuffer>>,
+    instances: Res<RenderTerrainGroundTextures>,
     image_assets: Res<RenderAssets<GpuImage>>,
-    fallback_image: Res<FallbackImage>,
     render_device: Res<RenderDevice>,
 ) {
     let (
         Some(pipeline),
         Some(samplers),
-        Some(tile_atlas),
+        Some(tile_arrays),
         Some(ambient_buffer),
         Some(params_buffer),
     ) = (
         pipeline,
         samplers,
-        tile_atlas,
+        tile_arrays,
         ambient_buffer,
         params_buffer,
     )
     else {
         return;
     };
-    // Only worth doing the work again while something we depend on might have just finished
-    // loading — once nothing changes for a frame, this is a no-op resource read and a bail.
-    if global.0.is_some() && !image_assets.is_changed() && !tile_atlas.is_changed() {
-        return;
-    }
-
-    let fallback_view = &*fallback_image.d2.texture_view;
-    let mut texture_views = vec![fallback_view; TILE_SLOT_COUNT as usize];
-    for (slot, handle) in tile_atlas.slots.iter().enumerate() {
-        if let Some(image) = handle.as_ref().and_then(|h| image_assets.get(h)) {
-            texture_views[slot] = &*image.texture_view;
-        }
-    }
-
-    let bind_group = render_device.create_bind_group(
-        "terrain_global_bind_group",
-        &pipeline.global_bind_group_layout,
-        &[
-            BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Sampler(&samplers.clamp),
-            },
-            BindGroupEntry {
-                binding: 1,
-                resource: BindingResource::TextureViewArray(&texture_views[..]),
-            },
-            BindGroupEntry {
-                binding: 2,
-                resource: BindingResource::Sampler(&samplers.tile),
-            },
-            BindGroupEntry {
-                binding: 3,
-                resource: BindingResource::Buffer(ambient_buffer.0.as_entire_buffer_binding()),
-            },
-            BindGroupEntry {
-                binding: 4,
-                resource: BindingResource::Buffer(params_buffer.0.as_entire_buffer_binding()),
-            },
-        ],
-    );
-    global.0 = Some(bind_group);
-}
-
-pub(crate) struct SetTerrainGlobalBindGroup;
-impl<P: PhaseItem> RenderCommand<P> for SetTerrainGlobalBindGroup {
-    type Param = SRes<TerrainGlobalBindGroup>;
-    type ViewQuery = ();
-    type ItemQuery = ();
-
-    fn render<'w>(
-        _item: &P,
-        _view: (),
-        _entity: Option<()>,
-        global: SystemParamItem<'w, '_, Self::Param>,
-        pass: &mut TrackedRenderPass<'w>,
-    ) -> RenderCommandResult {
-        let Some(bind_group) = &global.into_inner().0 else {
-            return RenderCommandResult::Skip;
-        };
-        pass.set_bind_group(4, bind_group, &[]);
-        RenderCommandResult::Success
-    }
-}
-
-/// Per-region bind groups (`tile_map` + `lightmap`), keyed by `MainEntity` — same reasoning as
-/// `RenderTerrainGroundTextures` above.
-#[derive(Resource, Default)]
-pub(crate) struct TerrainRegionBindGroups(MainEntityHashMap<BindGroup>);
-
-fn prepare_terrain_region_bind_groups(
-    mut bind_groups: ResMut<TerrainRegionBindGroups>,
-    pipeline: Option<Res<TerrainPipeline>>,
-    instances: Res<RenderTerrainGroundTextures>,
-    image_assets: Res<RenderAssets<GpuImage>>,
-    render_device: Res<RenderDevice>,
-) {
-    let Some(pipeline) = pipeline else { return };
+    let Some(arrays) = tile_array_views(&tile_arrays, &image_assets) else {
+        return; // still uploading
+    };
     // Prune entries for regions that no longer exist (despawned/unloaded) so this doesn't grow
     // unbounded as regions stream in/out over a long session.
     bind_groups
@@ -457,16 +296,15 @@ fn prepare_terrain_region_bind_groups(
         let bind_group = render_device.create_bind_group(
             "terrain_region_bind_group",
             &pipeline.region_bind_group_layout,
-            &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::TextureView(&tile_map.texture_view),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: BindingResource::TextureView(&lightmap.texture_view),
-                },
-            ],
+            &terrain_bind_group_entries(TerrainBindings {
+                tile_map: &tile_map.texture_view,
+                lightmap: &lightmap.texture_view,
+                clamp_sampler: &samplers.clamp,
+                tile_sampler: &samplers.tile,
+                tile_arrays: arrays,
+                ambient_ratio: &ambient_buffer.0,
+                params: &params_buffer.0,
+            }),
         );
         bind_groups.0.insert(entity, bind_group);
     }
@@ -488,7 +326,7 @@ impl<P: PhaseItem> RenderCommand<P> for SetTerrainRegionBindGroup {
         let Some(bind_group) = bind_groups.into_inner().0.get(&item.main_entity()) else {
             return RenderCommandResult::Skip;
         };
-        pass.set_bind_group(3, bind_group, &[]);
+        pass.set_bind_group(TERRAIN_BIND_GROUP as usize, bind_group, &[]);
         RenderCommandResult::Success
     }
 }
@@ -499,7 +337,6 @@ pub type DrawTerrainOpaque = (
     SetMeshViewBindingArrayBindGroup<1>,
     SetMeshBindGroup<2>,
     SetTerrainRegionBindGroup,
-    SetTerrainGlobalBindGroup,
     DrawMesh,
 );
 

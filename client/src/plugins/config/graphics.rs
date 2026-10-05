@@ -565,18 +565,17 @@ pub struct TerrainGraphicsSettings {
     pub pipeline: TerrainPipeline,
 }
 
-/// The two terrain ground draw paths (`client/src/assets/m/block_splat_material.rs`,
-/// `REGION_TILE_SLOT_COUNT`'s doc comment, has the full trade-off).
+/// The two terrain ground draw paths. Both sample the same global ground-tile arrays
+/// (`client/src/assets/m/tile_arrays.rs`); they differ in how the per-draw bind groups are built.
 ///
 /// `material` (default) is the stock `Material`/`MaterialPlugin` path: battle-tested, with shadow
-/// casting, prepass and deferred support for free, but it binds a region-local copy of the tile
-/// atlas once *per region*.
+/// casting, prepass and deferred support for free, but every region gets its own bind group
+/// (holding the shared arrays and buffers again).
 ///
 /// `hand_rolled` is the custom `SpecializedMeshPipeline` in `plugins/map/terrain/render/` that
-/// binds the whole atlas once, globally. Newer: shadow casting is its own reimplementation
-/// (directional/Sun only), and the render-debug backface toggle does not reach it yet. It needs a
-/// GPU that allows 1024 binding-array elements per shader stage; the startup capability check logs
-/// an error when it does not.
+/// binds the shared arrays and buffers once, globally. Newer: shadow casting is its own
+/// reimplementation (directional/Sun only), and the render-debug backface toggle does not reach it
+/// yet.
 ///
 /// Was the `terrain_hand_rolled_pipeline` Cargo feature; a config option so the two can be A/B'd
 /// on the same build. Read once at startup.
