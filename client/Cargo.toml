@@ -14,8 +14,10 @@ anyhow = { workspace = true }
 bevy_asset_loader = { version = "0.27", features = ["progress_tracking"] }
 bevy_brp_extras = "0.21.0"
 # Only to reach `bevy_render`'s `gles` feature (wgpu's native OpenGL backend),
-# which the `bevy` crate does not re-export; see the `gles` feature below.
-bevy_render = { version = "0.19", default-features = false, optional = true }
+# which the `bevy` crate does not re-export; see the `gles` feature below. Renamed
+# on purpose: Bevy's derive macros generate `bevy_render::` paths when a
+# dependency is literally named `bevy_render`, which breaks every non-gles build.
+bevy_render_gles = { package = "bevy_render", version = "0.19", default-features = false, optional = true }
 bevy-inspector-egui = "0.37"
 bevy_egui = "0.40"
 bevy_tweening = "0.16"
@@ -105,7 +107,7 @@ profile-tracy = ["bevy/trace_tracy"]
 # client on GPUs without usable Vulkan or DX12 (e.g. Haswell-era Intel iGPUs).
 # Opt-in and inert unless selected at runtime: Windows defaults to Vulkan/DX12,
 # `WGPU_BACKEND=gl` picks GL.
-gles = ["dep:bevy_render", "bevy_render/gles"]
+gles = ["dep:bevy_render_gles", "bevy_render_gles/gles"]
 # Opts in to the GPU integration test below. Not a runtime feature: it exists
 # so that a plain `cargo test -p client` does not select that test target.
 # Cargo builds a package's binaries whenever an integration test is selected
