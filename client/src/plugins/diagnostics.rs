@@ -89,6 +89,11 @@ pub const TERRAIN_BUILDING_COUNT: DiagnosticPath =
 /// and parked behind `RESOURCE_SPAWNS_PER_FRAME` (`dynamic_resource_loader`).
 pub const UNSPAWNED_RESOURCE_COUNT: DiagnosticPath =
     DiagnosticPath::const_new("world_counts/unspawned_resources");
+/// Distinct component combinations in the world. Every new one is matched
+/// against every query of every system, and building a query (some engine
+/// systems do per frame) walks all of them, so a count that keeps climbing
+/// is a CPU cost of its own.
+pub const ARCHETYPE_COUNT: DiagnosticPath = DiagnosticPath::const_new("world_counts/archetypes");
 
 // Sizes of the dedup/registry HashMaps (mesh, bind-pose, material and
 // map-object caches). Growth that never plateaus while revisiting the same
@@ -165,6 +170,7 @@ impl Plugin for DiagnosticsPlugin {
         app.register_diagnostic(Diagnostic::new(MESH_PART_COUNT).with_smoothing_factor(0.0))
             .register_diagnostic(Diagnostic::new(OTHER_COUNT).with_smoothing_factor(0.0))
             .register_diagnostic(Diagnostic::new(TERRAIN_BUILDING_COUNT).with_smoothing_factor(0.0))
+            .register_diagnostic(Diagnostic::new(ARCHETYPE_COUNT).with_smoothing_factor(0.0))
             .register_diagnostic(Diagnostic::new(FRAME_TIME_MAX_WINDOW).with_smoothing_factor(0.0))
             .register_diagnostic(Diagnostic::new(FRAME_TIME_LOW_1PCT).with_smoothing_factor(0.0))
             .register_diagnostic(Diagnostic::new(FRAME_TIME_LOW_01PCT).with_smoothing_factor(0.0))
@@ -200,6 +206,9 @@ impl Plugin for DiagnosticsPlugin {
                     ),
                     // Cache sizes only move while regions stream in; 4 Hz
                     // keeps six resource borrows off the per-frame schedule.
+                    archetype_count_system.run_if(bevy::time::common_conditions::on_timer(
+                        std::time::Duration::from_millis(250),
+                    )),
                     cache_count_system.run_if(bevy::time::common_conditions::on_timer(
                         std::time::Duration::from_millis(250),
                     )),
@@ -279,6 +288,13 @@ fn mesh_part_count_system(mut diagnostics: Diagnostics, parts: Query<(), MeshPar
 // twice. What remains in "other": region roots, loading intermediates,
 // scene-spawned resource anchors, UI text spans, cameras/lights, and
 // engine-internal entities (systems, observers).
+fn archetype_count_system(
+    mut diagnostics: Diagnostics,
+    archetypes: &bevy::ecs::archetype::Archetypes,
+) {
+    diagnostics.add_measurement(&ARCHETYPE_COUNT, || archetypes.len() as f64);
+}
+
 fn other_count_system(
     mut diagnostics: Diagnostics,
     entities: &Entities,
