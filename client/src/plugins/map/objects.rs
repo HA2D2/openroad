@@ -445,7 +445,9 @@ pub struct LoadingResources(pub Vec<Handle<SroResource>>);
 
 /// Anchor entity of one compound (.cpd) part, parenting that part's spawned
 /// resource. Pure marker so entity-count diagnostics can attribute these
-/// (their `UnloadedResource` is removed once the resource spawns).
+/// (their `UnloadedResource` is removed once the resource spawns). Plain
+/// single-resource placements have none: their placement entity anchors the
+/// resource directly.
 #[derive(Component)]
 pub struct CompoundPart;
 
@@ -640,10 +642,17 @@ pub fn load_terrain_objects_system(
                                                     )))
                                                     .insert(object.clone())
                                                     .insert(GameCursorTarget::default())
-                                                    .insert(LoadingResources(vec![
-                                                        resource_handle,
-                                                    ]));
-                                                // parent.add_command(SpawnResource(resource_handle, transform, None));
+                                                    // The placement itself anchors its one
+                                                    // resource (as characters and dungeon
+                                                    // objects do): routing it through
+                                                    // `LoadingResources` gave every plain
+                                                    // object an identity `CompoundPart` child
+                                                    // in between — ~4,800 extra entities in a
+                                                    // loaded area, each walked by the
+                                                    // per-frame visibility passes and spawned
+                                                    // and despawned with its region. The
+                                                    // spawner waits for the load itself.
+                                                    .insert(UnloadedResource(resource_handle));
                                             }
                                         }
                                     });
