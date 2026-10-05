@@ -73,6 +73,7 @@ pub mod system_message;
 pub mod target_menu;
 pub mod target_window;
 pub mod toast;
+pub mod ui_parking;
 pub mod underbar;
 pub mod window_positions;
 pub mod world_anchor;
@@ -179,6 +180,9 @@ impl Plugin for HudPlugin {
                 // five pages of the original's single frame behave as one.
                 main_popup::MainPopupPlugin,
                 cast_gauge::CastGaugePlugin,
+                // Not a window: parks closed windows' content out of the UI
+                // tree so Bevy's per-frame UI passes skip it.
+                ui_parking::UiParkingPlugin,
             ),
         ));
     }
