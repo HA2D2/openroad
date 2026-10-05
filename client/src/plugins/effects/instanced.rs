@@ -52,6 +52,7 @@ use bevy::render::texture::{FallbackImage, GpuImage};
 use bevy::render::view::ExtractedView;
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::transform::TransformSystems;
+use bevy::utils::Parallel;
 use bytemuck::{Pod, Zeroable};
 
 use crate::plugins::effects::components::{EffectNode, EffectVisual};
@@ -152,14 +153,28 @@ impl Plugin for InstancedEffectsPlugin {
 // Main world: gather
 // ---------------------------------------------------------------------------
 
+/// One visible particle on its way into the instance list.
+struct GatheredInstance {
+    key: BatchKey,
+    /// Squared distance to the camera, for the back-to-front order.
+    depth: f32,
+    layers: Option<RenderLayers>,
+    instance: EffectInstance,
+}
+
 /// Packs every visible instanced effect node into this frame's instance list.
 /// Hidden nodes (paused or culled effects, parked pool particles, a disabled
 /// effects toggle) are skipped through `InheritedVisibility`.
+///
+/// The per-node work runs across the compute pool into per-thread lists; one
+/// flat sort by (batch key, farthest first) then lays the batches out
+/// contiguously. Grouping through a hash map on one thread instead cost
+/// ~0.6 ms per frame at the Jangan West waterfall (trace of 2026-10-05).
 #[allow(clippy::type_complexity)]
 fn gather_effect_instances(
     mut frame: ResMut<EffectInstanceFrame>,
-    mut groups: Local<HashMap<BatchKey, (RenderLayers, Vec<(f32, EffectInstance)>)>>,
-    mut keys: Local<Vec<BatchKey>>,
+    mut gathered: Local<Vec<GatheredInstance>>,
+    mut per_thread: Local<Parallel<Vec<GatheredInstance>>>,
     cameras: Query<(&Camera, &RenderTarget, &GlobalTransform), With<Camera3d>>,
     nodes: Query<(
         &EffectInstanced,
@@ -174,65 +189,50 @@ fn gather_effect_instances(
     let frame = &mut *frame;
     frame.instances.clear();
     frame.batches.clear();
-    for (_, list) in groups.values_mut() {
-        list.clear();
-    }
     let camera = main_world_camera(&cameras).map_or(Vec3::ZERO, |t| t.translation());
 
-    for (instanced, node, global, inherited, tag, visual, layers) in &nodes {
-        if !inherited.get() {
-            continue;
-        }
-        let key = (node.root, instanced.mesh.id(), instanced.material.id());
-        let (group_layers, list) = groups
-            .entry(key)
-            .or_insert_with(|| (RenderLayers::default(), Vec::new()));
-        if list.is_empty() {
-            // one effect's nodes share their layers (the paper doll tags its
-            // whole clone), so the first node of the frame decides
-            *group_layers = layers.cloned().unwrap_or_default();
-        }
-        let position = global.translation();
-        list.push((
-            position.distance_squared(camera),
-            EffectInstance {
-                world_from_local: global.to_matrix().to_cols_array_2d(),
-                uv_offset_scale: visual.map_or(DEFAULT_UV, |v| v.last_uv.to_array()),
-                tint: tag.0,
-                _pad: [0; 3],
-            },
-        ));
-    }
-    // effects that ended drop out; everything else keeps its allocation
-    groups.retain(|_, (_, list)| !list.is_empty());
+    nodes.par_iter().for_each(
+        |(instanced, node, global, inherited, tag, visual, layers)| {
+            if !inherited.get() {
+                return;
+            }
+            per_thread.borrow_local_mut().push(GatheredInstance {
+                key: (node.root, instanced.mesh.id(), instanced.material.id()),
+                depth: global.translation().distance_squared(camera),
+                layers: layers.cloned(),
+                instance: EffectInstance {
+                    world_from_local: global.to_matrix().to_cols_array_2d(),
+                    uv_offset_scale: visual.map_or(DEFAULT_UV, |v| v.last_uv.to_array()),
+                    tint: tag.0,
+                    _pad: [0; 3],
+                },
+            });
+        },
+    );
+    gathered.clear();
+    per_thread.drain_into(&mut gathered);
 
-    // Fixed batch order: the phase sort is stable, so batches of one effect
-    // that tie on distance keep their draw order instead of following the
-    // map's iteration order (which shifts as effects come and go).
-    keys.clear();
-    keys.extend(groups.keys().copied());
-    keys.sort_unstable();
-    for key in keys.iter() {
-        let (_, mesh, material) = *key;
-        let Some((layers, list)) = groups.get_mut(key) else {
-            continue;
-        };
-        // back to front (farthest first) for alpha-blended combos
-        list.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+    // Batches in key order (the phase sort is stable, so batches of one
+    // effect that tie on distance keep a fixed draw order); inside a batch
+    // back to front (farthest first) for alpha-blended combos.
+    gathered.sort_unstable_by(|a, b| a.key.cmp(&b.key).then(b.depth.total_cmp(&a.depth)));
+    for group in gathered.chunk_by(|a, b| a.key == b.key) {
+        let (_, mesh, material) = group[0].key;
         let start = frame.instances.len() as u32;
         let mut sum = Vec3::ZERO;
-        for (_, instance) in list.iter() {
-            let t = instance.world_from_local[3];
+        for gathered in group {
+            let t = gathered.instance.world_from_local[3];
             sum += Vec3::new(t[0], t[1], t[2]);
-            frame.instances.push(*instance);
+            frame.instances.push(gathered.instance);
         }
-        let end = frame.instances.len() as u32;
         frame.batches.push(EffectBatch {
             mesh,
             material,
-            layers: layers.clone(),
-            center: sum / (end - start) as f32,
-            instances: start..end,
+            // one effect's nodes share their layers (the paper doll tags its
+            // whole clone), so any node of the group decides
+            layers: group[0].layers.clone().unwrap_or_default(),
+            center: sum / group.len() as f32,
+            instances: start..frame.instances.len() as u32,
         });
     }
 }
@@ -254,7 +254,6 @@ struct ExtractedEffectMaterial {
 
 #[derive(Resource, Default)]
 struct RenderEffectInstances {
-    instances: Vec<EffectInstance>,
     batches: Vec<EffectBatch>,
     materials: HashMap<AssetId<SroEffectMaterial>, ExtractedEffectMaterial>,
 }
@@ -272,13 +271,16 @@ struct EffectBatchLookup(EntityHashMap<u32>);
 fn extract_effect_instances(
     mut commands: Commands,
     mut render: ResMut<RenderEffectInstances>,
+    mut buffer: ResMut<EffectInstanceBuffer>,
     mut pool: ResMut<EffectBatchEntities>,
     frame: Extract<Res<EffectInstanceFrame>>,
     materials: Extract<Res<Assets<SroEffectMaterial>>>,
 ) {
     let render = &mut *render;
-    render.instances.clear();
-    render.instances.extend_from_slice(&frame.instances);
+    // staged straight into the upload buffer's CPU side (one copy)
+    let staged = buffer.0.values_mut();
+    staged.clear();
+    staged.extend_from_slice(&frame.instances);
     render.batches.clone_from(&frame.batches);
     render.materials.clear();
     for batch in &frame.batches {
@@ -525,20 +527,15 @@ impl Default for EffectInstanceBuffer {
     }
 }
 
+/// Uploads the instances `extract_effect_instances` staged in the buffer.
 fn prepare_effect_instance_buffer(
     mut buffer: ResMut<EffectInstanceBuffer>,
-    instances: Res<RenderEffectInstances>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
 ) {
-    buffer.0.clear();
-    if instances.instances.is_empty() {
-        return;
+    if !buffer.0.is_empty() {
+        buffer.0.write_buffer(&render_device, &render_queue);
     }
-    for instance in &instances.instances {
-        buffer.0.push(*instance);
-    }
-    buffer.0.write_buffer(&render_device, &render_queue);
 }
 
 /// Bind group per material in use, rebuilt only when its extracted values
