@@ -134,6 +134,29 @@ scenes:
 
 `dungeons` and `skills` are the other two offline scenes.
 
+## 8. On a weak or older GPU
+
+The defaults already leave out two costly GPU features (`bindless_materials`,
+`sky_reflections`). If frame rate is still low, these `graphics:` settings in
+`config.yaml` matter most, measured on an integrated laptop GPU facing dense
+vegetation:
+
+```yaml
+graphics:
+  msaa: 1                       # the largest fixed cost; FXAA still smooths edges
+  objects:
+    nature_view_distance: 2000  # trees/grass/flowers end here instead of at the fog: ~+16% FPS
+  water:
+    quality: low                # the high tier refracts and raymarches every water pixel
+  render_scale: 0.75            # render below window resolution, then upscale
+```
+
+`nature_view_distance: 1200` went further (~+27% in the same view); the fog hides
+most of what is cut either way. Restart the client after changing them (`nature_view_distance`
+only reaches objects spawned afterwards). The measurements behind them,
+and how to take your own, are in
+[`perf-remote.md`](https://github.com/ferdoran/openroad/blob/main/docs/perf-remote.md).
+
 ## Troubleshooting
 
 | Symptom | Cause |

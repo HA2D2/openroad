@@ -518,6 +518,119 @@ so `OBJECT_SPAWNS_PER_FRAME`/`REGION_UNLOADS_PER_FRAME` (currently 64 and 2)
 have room to tune tighter if a smoother result is wanted — start there
 before looking elsewhere if this needs another pass.
 
+## GPU capability and feature switches
+
+Bevy requests every optional GPU feature the adapter offers and the adapter's own
+limits, then picks code paths from them. Three environment variables (read once at
+startup, `render_plugin` in `client/src/main.rs`) take that apart for measurement:
+
+| switch | effect |
+|---|---|
+| `OPENROAD_GPU_BASELINE=1` | WebGPU-baseline limits and no optional features except BC texture compression: roughly what a ~2014 D3D11/12 or Vulkan 1.0 GPU guarantees (see ADR 0011). Anything the client needs beyond that shows up as a validation error on a current machine. `WGPU_SETTINGS_PRIO=webgpu` alone also drops BC, which no real old PC lacks and every DDJ texture uses. |
+| `OPENROAD_WGPU_DISABLE=<list>` | Withholds features on top of the config: the groups `bindless`, `indirect` (GPU mesh preprocessing + multi-draw indirect), `mappable` (`MAPPABLE_PRIMARY_BUFFERS`, which Bevy enables on integrated GPUs), or raw wgpu feature names (`TIMESTAMP_QUERY`), comma-separated. |
+| `OPENROAD_GPU_LIMITS=webgpu` | WebGPU-default limits, features kept. Combine with `bindless` off: Bevy enables bindless by feature alone, and those limits allow no binding-array elements, so the client crashes otherwise. |
+
+The native OpenGL backend is a build feature: `cargo build --release -p client
+--features gles`, then `WGPU_BACKEND=gl`. It is inert unless selected.
+
+Two traps: a variable set in a PowerShell window stays set for every later launch from
+that window (`Remove-Item Env:OPENROAD_GPU_BASELINE`), and the pass timers and the
+`fragment_shader_invocations` counts need timestamp and pipeline-statistics queries,
+so under `OPENROAD_GPU_BASELINE` they read 0 — compare FPS and frame time there.
+
+## Worked example: two Bevy defaults cost ~3 ms at the waterfall
+
+Facing the Jangan West waterfall (AMD integrated GPU, 1920x1080, vanilla lighting),
+`OPENROAD_GPU_BASELINE=1` ran at 82 FPS against 57-59 normally. Bisecting with the
+switches above, one launch per row, same view, window focused:
+
+| configuration | FPS | opaque pass (GPU) |
+|---|---|---|
+| normal (then-defaults) | 57-59 | 7.4-8.0 ms |
+| diagnostics tier off (`diagnostics: false`) | 59 | — |
+| `mappable` off | 59 | 7.1 ms |
+| `indirect` off | 60 | 7.8 ms |
+| `bindless` off | 63-65 | 5.8 ms |
+| `bindless` + `indirect` off | 66.5 | 6.5 ms |
+| `bindless` off + WebGPU limits | 73-77 | 5.1-5.8 ms |
+| `OPENROAD_GPU_BASELINE=1` | 82-84 | (no timers) |
+
+- **Bindless material slabs** (`StandardMaterial` binding its textures from shared
+  arrays indexed per fragment) cost ~1.7 ms with identical output. Now off by default:
+  `graphics.bindless_materials`.
+- **The WebGPU limits looked like a win but were a side effect.** They allow 4 storage
+  textures per stage; Bevy's environment-map generation needs 6, so the sky
+  environment map was never built and no pixel sampled it. Measured on its own
+  (`graphics.sky_reflections: false`, normal limits): 64 -> 71 FPS, ~1.6 ms, with no
+  visible difference in vanilla lighting — off by default.
+- GPU-driven indirect drawing, mappable buffers and the per-pass GPU timers cost
+  nothing measurable. The last ~1 ms between 76 and 82 FPS is not attributed yet.
+
+## Worked example: vegetation overdraw, attributed by hiding
+
+The same view shaded **11.8M opaque fragments for a 2.07M-pixel screen**; elsewhere the
+count is about 2x the pixels. Fragments were attributed by hiding one group of visible
+meshes at a time over BRP (`world.insert_components` with `Visibility::Hidden`,
+filtered by `MeshMaterial3d<...>` type, then by the resource name of each mesh's
+parent) and reading `render/main_opaque_pass_3d/fragment_shader_invocations` before
+and after, restoring the original `Visibility` afterwards:
+
+- Every `StandardMaterial` mesh together: -4.6M; the other material types
+  (sheen, UV-scroll, water, sky, clouds) under 0.1M each.
+- Within those, four kinds of vegetation: `c_hhm_tree` -0.93M, `tre_pine` -0.87M,
+  `tre_tree` -0.80M, `grs_weed` grass -0.78M. Everything else under 0.1M per group.
+
+They are alpha-tested cards. Their `discard` stops early depth rejection, so every
+layer is shaded in full:
+
+- **Depth prepass** (`graphics.depth_prepass`): the opaque pass dropped from 11.8M to
+  7.6M fragments and 7.1 -> 5.0 ms, but the prepass itself took 1.5 ms (it alpha-tests
+  too) — ~0.6 ms net. Opt-in.
+- **Cheaper shading** (render-debug `unlit_materials`, every `StandardMaterial` unlit
+  live): only ~0.9 ms (12.2 -> 11.4 ms). Shading math is not where the time goes; a
+  cheaper object material is not worth it on its own.
+- **Drawing fewer distant cards** is the lever. `graphics.objects.nature_view_distance`
+  caps the LOD range of every `res/nature/` resource (render-debug knob of the same
+  name to try values live):
+
+| vegetation view distance | FPS | shaded fragments | alpha-mask draws |
+|---|---|---|---|
+| unlimited (fog, 5760) | 68 | 12.6M | 22 |
+| 3000 | 72 | 11.0M | 17 |
+| 2000 | 79 | 10.1M | 14 |
+| 1200 | 86 | 7.3M | 9 |
+
+With all three changes (bindless off, sky reflections off, vegetation at 2000) the
+waterfall went from 57-59 to 75 FPS.
+
+## Worked example: per-entity CPU costs
+
+Bevy's per-frame passes (visibility, transforms, extraction, scheduling) cost per
+entity and per system, so a lot of the CPU wins came from doing less of either.
+Measured at the waterfall or a busy town with the levers each change introduced:
+
+| change | where | measured |
+|---|---|---|
+| effect particles drawn GPU-instanced, one transparent item per (effect, mesh, material) | `plugins/effects/instanced.rs` | transparent draws added by effects ~2,000-2,700 -> ~330-450; their render-thread CPU ~2.8 -> ~1 ms |
+| instance gather across the compute pool, one flat sort | `instanced.rs` | effects' main-thread cost ~2.5-3.5 -> ~1.5 ms |
+| closed windows' content parked under a non-UI holder | `plugins/hud/ui_parking.rs` | main thread 9.3 -> 8.2 ms with all windows closed (~1,900 of ~2,800 UI nodes) |
+| one packet dispatcher instead of one system per opcode | `packets/src/lib.rs` | ~0.4 ms; ~250 idle systems fewer |
+| directional-light shadow visibility only with shadow maps on | `plugins/environment/light_visibility.rs` | ~0.37 ms/frame in vanilla mode (it rebuilt a world query over ~2,500 archetypes) |
+| off-screen map-prop animation paused | `plugins/animation_culling.rs` | bones animated per frame 1,668 -> 138 |
+| single-resource map objects anchored on their placement | `plugins/map/objects.rs` | ~3,500 fewer entities in a loaded area |
+
+The per-system numbers came from a chrome trace (`--features profile-chrome`,
+`trace_summary`); self time per system summed per crate/module is the quickest way to
+see that engine passes, not game systems, dominate (game systems were ~16% of system
+time at the waterfall).
+
+## Gotcha: Windows caps an unfocused window at 60 FPS
+
+Readings of exactly 60.0 FPS / 16.67 ms with `render/pipeline/acquire_ms` near 1 ms
+mean the game window was not in the foreground — typing into a terminal next to it is
+enough. The cap hides any improvement above 60. Keep the game window focused while
+sampling, and treat a flat 16.67 ms as "capped", not as a result.
+
 ## Gotcha: a background `cargo`/`rustc` build skews every reading
 
 Discovered mid-session the hard way: a `make perf fps`/`snapshot` reading can
