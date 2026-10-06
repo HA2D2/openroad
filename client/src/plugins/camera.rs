@@ -969,12 +969,25 @@ fn apply_window_camera_msaa(
     mut commands: Commands,
     config: Res<ClientConfig>,
     // RenderTarget is its own component in 0.19, not a field on Camera.
-    cameras: Query<(Entity, &RenderTarget), Added<Camera>>,
+    cameras: Query<(Entity, &RenderTarget, Has<Camera3d>), Added<Camera>>,
 ) {
     let msaa = config.graphics.msaa.to_msaa();
-    for (entity, target) in &cameras {
+    for (entity, target, is_3d) in &cameras {
         if matches!(target, RenderTarget::Window(_)) {
             commands.entity(entity).insert(msaa);
+            if is_3d && config.graphics.depth_prepass {
+                commands
+                    .entity(entity)
+                    .insert(bevy::core_pipeline::prepass::DepthPrepass);
+            }
+            // `graphics.sky_reflections`: the spawn sites always attach the sky
+            // environment map; without it no lit pixel samples it at all.
+            if is_3d && !config.graphics.sky_reflections {
+                commands.entity(entity).remove::<(
+                    bevy::light::GeneratedEnvironmentMapLight,
+                    bevy::light::EnvironmentMapLight,
+                )>();
+            }
         }
     }
 }

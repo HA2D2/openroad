@@ -61,6 +61,27 @@ pub struct GraphicsSettings {
     pub render_scale: RenderScale,
     #[serde(default)]
     pub tonemapping: TonemappingConfig,
+    /// Depth-only prepass on the window cameras, so the main pass shades each
+    /// pixel once: early-Z then rejects every hidden fragment before its
+    /// material runs. Facing the Jangan West waterfall the opaque pass shaded
+    /// ~10M fragments for a 2M-pixel screen (map objects stacked behind each
+    /// other, drawn in no particular depth order) — ~3.5 ms of GPU time.
+    #[serde(default)]
+    pub depth_prepass: bool,
+    /// Bevy's bindless material slabs (`StandardMaterial` and friends binding their textures
+    /// from shared arrays indexed per fragment). Bevy turns them on wherever the GPU offers the
+    /// features; off here (the default) withholds those features so materials use ordinary
+    /// bind groups. Facing the Jangan West waterfall on an AMD iGPU that was ~1.7 ms of GPU time
+    /// per frame (57-59 -> 63-65 FPS) with identical output. Restart-only.
+    #[serde(default)]
+    pub bindless_materials: bool,
+    /// The sky environment map on the window cameras (`environment::reflections`): every lit
+    /// pixel samples its diffuse and specular cubemaps. Off (the default) skips it entirely:
+    /// facing the Jangan West waterfall that was 64 -> 71 FPS (~1.6 ms of GPU time) with no
+    /// visible difference in vanilla lighting — the original client had no image-based lighting
+    /// either. Sheen materials keep their own sphere maps either way. Restart-only.
+    #[serde(default)]
+    pub sky_reflections: bool,
 }
 
 /// Which water shader the streamed water planes use.
@@ -311,6 +332,16 @@ pub struct ObjectLodSettings {
     /// Width of the dither/crossfade band before the cull distance. Materials
     /// without the crossfade path hard-cut at the far edge instead.
     pub fade: f32,
+    /// View distance (world units) for `res/nature/` resources — trees, grass,
+    /// flowers. 0 = unlimited (they reach the fog like everything else). Their
+    /// alpha-tested cards are the heaviest overdraw in dense views: facing the
+    /// Jangan West waterfall, 2000 took 12.6M shaded fragments to 10.1M
+    /// (68 -> 79 FPS) and 1200 to 7.3M (86 FPS), with the fog already hiding
+    /// most of what is cut. Applies to objects spawned after it changes.
+    pub nature_view_distance: f32,
+    /// The ceiling for one spawn, from [`Self::for_resource`]; not configured.
+    #[serde(skip)]
+    pub cap: Option<f32>,
 }
 
 impl Default for ObjectLodSettings {
@@ -319,8 +350,30 @@ impl Default for ObjectLodSettings {
             factor: 150.0,
             min_distance: 1200.0,
             fade: 600.0,
+            nature_view_distance: 0.0,
+            cap: None,
         }
     }
+}
+
+impl ObjectLodSettings {
+    /// The settings a resource at `path` spawns with: `nature_view_distance`
+    /// caps `res/nature/` resources when set.
+    pub fn for_resource(&self, path: Option<&bevy::asset::AssetPath>) -> Self {
+        let mut lod = self.clone();
+        lod.cap = (self.nature_view_distance > 0.0 && path.is_some_and(is_nature_path))
+            .then_some(self.nature_view_distance);
+        lod
+    }
+}
+
+/// Trees, grass, flowers and other vegetation (`res/nature/...`).
+pub fn is_nature_path(path: &bevy::asset::AssetPath) -> bool {
+    path.path()
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('\\', "/")
+        .contains("res/nature/")
 }
 
 /// Distance fog (`plugins/map/terrain/rendering.rs`, driven per-frame by
@@ -558,18 +611,17 @@ pub struct TerrainGraphicsSettings {
     pub pipeline: TerrainPipeline,
 }
 
-/// The two terrain ground draw paths (`client/src/assets/m/block_splat_material.rs`,
-/// `REGION_TILE_SLOT_COUNT`'s doc comment, has the full trade-off).
+/// The two terrain ground draw paths. Both sample the same global ground-tile arrays
+/// (`client/src/assets/m/tile_arrays.rs`); they differ in how the per-draw bind groups are built.
 ///
 /// `material` (default) is the stock `Material`/`MaterialPlugin` path: battle-tested, with shadow
-/// casting, prepass and deferred support for free, but it binds a region-local copy of the tile
-/// atlas once *per region*.
+/// casting, prepass and deferred support for free, but every region gets its own bind group
+/// (holding the shared arrays and buffers again).
 ///
 /// `hand_rolled` is the custom `SpecializedMeshPipeline` in `plugins/map/terrain/render/` that
-/// binds the whole atlas once, globally. Newer: shadow casting is its own reimplementation
-/// (directional/Sun only), and the render-debug backface toggle does not reach it yet. It needs a
-/// GPU that allows 1024 binding-array elements per shader stage; the startup capability check logs
-/// an error when it does not.
+/// binds the shared arrays and buffers once, globally. Newer: shadow casting is its own
+/// reimplementation (directional/Sun only), and the render-debug backface toggle does not reach it
+/// yet.
 ///
 /// Was the `terrain_hand_rolled_pipeline` Cargo feature; a config option so the two can be A/B'd
 /// on the same build. Read once at startup.
@@ -780,5 +832,23 @@ impl BloomSettings {
             intensity: self.intensity,
             ..Bloom::NATURAL
         }
+    }
+}
+
+#[cfg(test)]
+mod gpu_option_tests {
+    use super::*;
+
+    #[test]
+    fn bindless_and_sky_reflections_default_off() {
+        let empty: GraphicsSettings = serde_yaml::from_str("{}").unwrap();
+        assert!(!empty.bindless_materials);
+        assert!(!empty.sky_reflections);
+        assert!(!GraphicsSettings::default().sky_reflections);
+
+        let set: GraphicsSettings =
+            serde_yaml::from_str("bindless_materials: true\nsky_reflections: true").unwrap();
+        assert!(set.bindless_materials);
+        assert!(set.sky_reflections);
     }
 }

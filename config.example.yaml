@@ -217,6 +217,12 @@ graphics:
     factor: 150.0
     min_distance: 1200.0
     fade: 600.0
+    # View distance for vegetation (res/nature: trees, grass, flowers); 0 =
+    # unlimited, i.e. to the fog like everything else. Their alpha-tested cards
+    # are the heaviest overdraw facing dense vegetation: at the Jangan West
+    # waterfall 2000 gave 68 -> 79 FPS and 1200 86 FPS, the fog hiding most of
+    # what is cut. Applies to objects spawned after a change (restart).
+    nature_view_distance: 0.0
   # Multisample anti-aliasing for the window cameras: 1 (off), 2, 4 or 8.
   #
   # This is the renderer's largest fixed cost — it multiplies rasterization AND
@@ -280,6 +286,21 @@ graphics:
   # Keep tony_mc_mapface (Bevy's default, and what this shipped with) if bloom
   # is on - that is the case the curve exists for.
   tonemapping: tony_mc_mapface
+  # Depth-only prepass on the window cameras, so hidden opaque pixels are
+  # rejected before their material runs. Facing the Jangan West waterfall it
+  # cut the opaque pass from 11.8M to 7.6M shaded fragments (alpha-tested
+  # foliage still overdraws), for ~0.6 ms net on an integrated GPU.
+  depth_prepass: false
+  # Bevy's bindless material slabs. Off withholds the GPU features they need,
+  # so materials use ordinary bind groups - identical output, ~1.7 ms of GPU
+  # time cheaper per frame at the waterfall on an AMD iGPU. Restart-only.
+  bindless_materials: false
+  # Sky environment map on the main cameras: every lit pixel samples it.
+  # Off by default: ~1.6 ms of GPU time at the waterfall (64 -> 71 FPS) with
+  # no visible difference in vanilla lighting, and the original client had no
+  # image-based lighting. Sheen materials keep their own sphere maps.
+  # Restart-only.
+  sky_reflections: false
 # Combat presentation.
 combat:
   # Seconds a knocked-down body lies there (DOWN_RM, anim type 63) between the
