@@ -63,6 +63,7 @@ impl Plugin for RenderControlsPlugin {
                     on_settings_changed,
                     on_foliage_settings_changed,
                     on_water_settings_changed,
+                    on_unlit_materials_changed,
                 )
                     .run_if(resource_changed::<RenderDebugSettings>),
             );
@@ -128,6 +129,11 @@ pub struct RenderDebugSettings {
     /// Particle/visual effects: hides all effect wrappers and pauses the
     /// whole effect runtime (zero CPU cost) — for A/B-ing its FPS impact.
     pub render_effects: bool,
+    /// Measurement only: renders every `StandardMaterial` unlit (texture,
+    /// fog, tonemapping — Bevy's cheapest material path), the lower bound of
+    /// what a cheaper object material could save on the GPU. Flipping it
+    /// back restores exactly the materials it changed.
+    pub unlit_materials: bool,
     /// Leaf self-emission for ALL effects (default on — exe-faithful:
     /// StaticEmit always emits; off = leaf emitters degrade to single
     /// plates replaying their envelope once per loop). Applies to effects
@@ -246,6 +252,7 @@ impl Default for RenderDebugSettings {
             foliage_density: 1.0,
             foliage_view_distance: 0.0,
             render_effects: true,
+            unlit_materials: false,
             leaf_emit_global: true,
             leaf_emit_density: 1.0,
             effect_additive_intensity: 1.0,
@@ -638,5 +645,35 @@ mod tests {
         let settings = world.resource::<RenderDebugSettings>();
         assert_eq!(settings.enable_shadows, expected_shadows);
         assert_eq!(settings.foliage_view_distance, expected_view_distance);
+    }
+}
+
+/// Applies `RenderDebugSettings::unlit_materials`, remembering which
+/// materials it switched so turning it off restores only those (materials that
+/// are unlit by design stay unlit). Separate system for the same parameter
+/// ceiling as the toggles above.
+fn on_unlit_materials_changed(
+    settings: Res<RenderDebugSettings>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut switched: Local<std::collections::HashSet<AssetId<StandardMaterial>>>,
+) {
+    if settings.unlit_materials {
+        let lit: Vec<_> = materials
+            .iter()
+            .filter(|(_, material)| !material.unlit)
+            .map(|(id, _)| id)
+            .collect();
+        for id in lit {
+            if let Some(mut material) = materials.get_mut(id) {
+                material.unlit = true;
+                switched.insert(id);
+            }
+        }
+    } else {
+        for id in switched.drain() {
+            if let Some(mut material) = materials.get_mut(id) {
+                material.unlit = false;
+            }
+        }
     }
 }
