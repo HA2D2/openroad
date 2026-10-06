@@ -332,6 +332,16 @@ pub struct ObjectLodSettings {
     /// Width of the dither/crossfade band before the cull distance. Materials
     /// without the crossfade path hard-cut at the far edge instead.
     pub fade: f32,
+    /// View distance (world units) for `res/nature/` resources — trees, grass,
+    /// flowers. 0 = unlimited (they reach the fog like everything else). Their
+    /// alpha-tested cards are the heaviest overdraw in dense views: facing the
+    /// Jangan West waterfall, 2000 took 12.6M shaded fragments to 10.1M
+    /// (68 -> 79 FPS) and 1200 to 7.3M (86 FPS), with the fog already hiding
+    /// most of what is cut. Applies to objects spawned after it changes.
+    pub nature_view_distance: f32,
+    /// The ceiling for one spawn, from [`Self::for_resource`]; not configured.
+    #[serde(skip)]
+    pub cap: Option<f32>,
 }
 
 impl Default for ObjectLodSettings {
@@ -340,8 +350,30 @@ impl Default for ObjectLodSettings {
             factor: 150.0,
             min_distance: 1200.0,
             fade: 600.0,
+            nature_view_distance: 0.0,
+            cap: None,
         }
     }
+}
+
+impl ObjectLodSettings {
+    /// The settings a resource at `path` spawns with: `nature_view_distance`
+    /// caps `res/nature/` resources when set.
+    pub fn for_resource(&self, path: Option<&bevy::asset::AssetPath>) -> Self {
+        let mut lod = self.clone();
+        lod.cap = (self.nature_view_distance > 0.0 && path.is_some_and(is_nature_path))
+            .then_some(self.nature_view_distance);
+        lod
+    }
+}
+
+/// Trees, grass, flowers and other vegetation (`res/nature/...`).
+pub fn is_nature_path(path: &bevy::asset::AssetPath) -> bool {
+    path.path()
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('\\', "/")
+        .contains("res/nature/")
 }
 
 /// Distance fog (`plugins/map/terrain/rendering.rs`, driven per-frame by

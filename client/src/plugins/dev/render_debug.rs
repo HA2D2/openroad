@@ -64,6 +64,7 @@ impl Plugin for RenderControlsPlugin {
                     on_foliage_settings_changed,
                     on_water_settings_changed,
                     on_unlit_materials_changed,
+                    on_nature_view_distance_changed,
                 )
                     .run_if(resource_changed::<RenderDebugSettings>),
             );
@@ -134,6 +135,12 @@ pub struct RenderDebugSettings {
     /// what a cheaper object material could save on the GPU. Flipping it
     /// back restores exactly the materials it changed.
     pub unlit_materials: bool,
+    /// Live override of `graphics.objects.nature_view_distance`: when > 0, caps
+    /// the view distance (world units) of every mesh spawned from a
+    /// `res/nature/` resource — trees, grass, flowers, the alpha-tested cards
+    /// that dominate overdraw facing dense vegetation. 0 restores each mesh's
+    /// own LOD range.
+    pub nature_view_distance: f32,
     /// Leaf self-emission for ALL effects (default on — exe-faithful:
     /// StaticEmit always emits; off = leaf emitters degrade to single
     /// plates replaying their envelope once per loop). Applies to effects
@@ -253,6 +260,7 @@ impl Default for RenderDebugSettings {
             foliage_view_distance: 0.0,
             render_effects: true,
             unlit_materials: false,
+            nature_view_distance: 0.0,
             leaf_emit_global: true,
             leaf_emit_density: 1.0,
             effect_additive_intensity: 1.0,
@@ -675,5 +683,73 @@ fn on_unlit_materials_changed(
                 material.unlit = false;
             }
         }
+    }
+}
+
+/// Applies `RenderDebugSettings::nature_view_distance` live to the meshes of
+/// `res/nature/` resources (the spawn-time setting is
+/// `graphics.objects.nature_view_distance`). Each mesh's own range is recorded
+/// the first time it is capped and every cap is computed from that, so stepping
+/// the knob is exact and 0 restores it. Meshes spawned while the knob is on keep
+/// their spawn range until the next settings change — fine for a live override.
+#[allow(clippy::type_complexity)]
+fn on_nature_view_distance_changed(
+    settings: Res<RenderDebugSettings>,
+    mut commands: Commands,
+    meshes: Query<
+        (
+            Entity,
+            &ChildOf,
+            Option<&bevy::camera::visibility::VisibilityRange>,
+        ),
+        With<Mesh3d>,
+    >,
+    resources: Query<&crate::commands::SpawnedFromResource>,
+    mut originals: Local<
+        std::collections::HashMap<Entity, Option<bevy::camera::visibility::VisibilityRange>>,
+    >,
+    mut applied: Local<f32>,
+) {
+    let distance = settings.nature_view_distance.max(0.0);
+    if distance == *applied {
+        return;
+    }
+    *applied = distance;
+    if distance == 0.0 {
+        for (entity, original) in originals.drain() {
+            let Ok(mut entity) = commands.get_entity(entity) else {
+                continue;
+            };
+            match original {
+                Some(range) => entity.insert(range),
+                None => entity.remove::<bevy::camera::visibility::VisibilityRange>(),
+            };
+        }
+        return;
+    }
+    let is_nature = |parent: Entity| {
+        resources.get(parent).is_ok_and(|resource| {
+            resource
+                .0
+                .path()
+                .is_some_and(crate::plugins::config::graphics::is_nature_path)
+        })
+    };
+    for (entity, child_of, range) in &meshes {
+        if !is_nature(child_of.parent()) {
+            continue;
+        }
+        // the mesh's own range, recorded once — never a range this knob set
+        let original = originals.entry(entity).or_insert_with(|| range.cloned());
+        let end = original
+            .as_ref()
+            .map_or(distance, |r| r.end_margin.end.min(distance));
+        commands
+            .entity(entity)
+            .insert(bevy::camera::visibility::VisibilityRange {
+                start_margin: 0.0..0.0,
+                end_margin: (end - 200.0).max(0.0)..end,
+                use_aabb: false,
+            });
     }
 }

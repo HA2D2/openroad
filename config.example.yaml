@@ -217,6 +217,12 @@ graphics:
     factor: 150.0
     min_distance: 1200.0
     fade: 600.0
+    # View distance for vegetation (res/nature: trees, grass, flowers); 0 =
+    # unlimited, i.e. to the fog like everything else. Their alpha-tested cards
+    # are the heaviest overdraw facing dense vegetation: at the Jangan West
+    # waterfall 2000 gave 68 -> 79 FPS and 1200 86 FPS, the fog hiding most of
+    # what is cut. Applies to objects spawned after a change (restart).
+    nature_view_distance: 0.0
   # Multisample anti-aliasing for the window cameras: 1 (off), 2, 4 or 8.
   #
   # This is the renderer's largest fixed cost — it multiplies rasterization AND

@@ -113,10 +113,11 @@ const OBJECT_LOD_MAX_DIST: f32 = (VISIBLE_RANGE + FOG_RANGE) as f32 * REGION_SIZ
 /// matching how `cull_fogged_objects`/`cull_distant_animations` measure.
 fn mesh_visibility_range(bounding_box: (Vec3, Vec3), lod: &ObjectLodSettings) -> VisibilityRange {
     let extent = (bounding_box.1 - bounding_box.0).max_element().max(0.0);
-    let cull = (extent * lod.factor).clamp(
-        lod.min_distance.min(OBJECT_LOD_MAX_DIST),
-        OBJECT_LOD_MAX_DIST,
-    );
+    // a configured cap (`nature_view_distance`) lowers the fog ceiling
+    let max = lod
+        .cap
+        .map_or(OBJECT_LOD_MAX_DIST, |cap| cap.min(OBJECT_LOD_MAX_DIST));
+    let cull = (extent * lod.factor).clamp(lod.min_distance.min(max), max);
     VisibilityRange {
         start_margin: 0.0..0.0,
         end_margin: (cull - lod.fade).max(0.0)..cull,
@@ -493,7 +494,8 @@ impl SpawnResource {
         let lod = world
             .get_resource::<ClientConfig>()
             .map(|config| config.graphics.objects.clone())
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .for_resource(self.resource.path());
         // `material_set_path` came from this handle, so it is always `Some` here
         let Some(material_set) = material_handle else {
             return;
@@ -1313,6 +1315,47 @@ mod tests {
 
     use super::*;
     use crate::assets::bsr::bsr::PrimitiveAnimationEvent;
+
+    /// `graphics.objects.nature_view_distance` caps vegetation only, and only
+    /// when set; everything else keeps the fog ceiling.
+    #[test]
+    fn nature_view_distance_caps_vegetation_only() {
+        let big_part = (Vec3::ZERO, Vec3::splat(100.0)); // 100 * 150 = past the fog ceiling
+        let tree = AssetPath::parse("data://res/nature/common/tree/tre_pine03.bsr");
+        let house = AssetPath::parse("data://res/bldg/china/house01.bsr");
+
+        let unlimited = ObjectLodSettings::default();
+        let off = unlimited.for_resource(Some(&tree));
+        assert_eq!(
+            mesh_visibility_range(big_part, &off).end_margin.end,
+            OBJECT_LOD_MAX_DIST
+        );
+
+        let capped = ObjectLodSettings {
+            nature_view_distance: 2000.0,
+            ..ObjectLodSettings::default()
+        };
+        let tree_lod = capped.for_resource(Some(&tree));
+        assert_eq!(
+            mesh_visibility_range(big_part, &tree_lod).end_margin,
+            1400.0..2000.0
+        );
+        let house_lod = capped.for_resource(Some(&house));
+        assert_eq!(
+            mesh_visibility_range(big_part, &house_lod).end_margin.end,
+            OBJECT_LOD_MAX_DIST
+        );
+        // a cap below the near floor wins over the floor
+        let tight = ObjectLodSettings {
+            nature_view_distance: 800.0,
+            ..ObjectLodSettings::default()
+        }
+        .for_resource(Some(&tree));
+        assert_eq!(
+            mesh_visibility_range(big_part, &tight).end_margin.end,
+            800.0
+        );
+    }
 
     #[test]
     fn material_asset_path_preserves_hash_in_label() {
