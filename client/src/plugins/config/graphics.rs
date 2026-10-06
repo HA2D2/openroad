@@ -68,6 +68,20 @@ pub struct GraphicsSettings {
     /// other, drawn in no particular depth order) — ~3.5 ms of GPU time.
     #[serde(default)]
     pub depth_prepass: bool,
+    /// Bevy's bindless material slabs (`StandardMaterial` and friends binding their textures
+    /// from shared arrays indexed per fragment). Bevy turns them on wherever the GPU offers the
+    /// features; off here (the default) withholds those features so materials use ordinary
+    /// bind groups. Facing the Jangan West waterfall on an AMD iGPU that was ~1.7 ms of GPU time
+    /// per frame (57-59 -> 63-65 FPS) with identical output. Restart-only.
+    #[serde(default)]
+    pub bindless_materials: bool,
+    /// The sky environment map on the window cameras (`environment::reflections`): every lit
+    /// pixel samples its diffuse and specular cubemaps. Off (the default) skips it entirely:
+    /// facing the Jangan West waterfall that was 64 -> 71 FPS (~1.6 ms of GPU time) with no
+    /// visible difference in vanilla lighting — the original client had no image-based lighting
+    /// either. Sheen materials keep their own sphere maps either way. Restart-only.
+    #[serde(default)]
+    pub sky_reflections: bool,
 }
 
 /// Which water shader the streamed water planes use.
@@ -786,5 +800,23 @@ impl BloomSettings {
             intensity: self.intensity,
             ..Bloom::NATURAL
         }
+    }
+}
+
+#[cfg(test)]
+mod gpu_option_tests {
+    use super::*;
+
+    #[test]
+    fn bindless_and_sky_reflections_default_off() {
+        let empty: GraphicsSettings = serde_yaml::from_str("{}").unwrap();
+        assert!(!empty.bindless_materials);
+        assert!(!empty.sky_reflections);
+        assert!(!GraphicsSettings::default().sky_reflections);
+
+        let set: GraphicsSettings =
+            serde_yaml::from_str("bindless_materials: true\nsky_reflections: true").unwrap();
+        assert!(set.bindless_materials);
+        assert!(set.sky_reflections);
     }
 }

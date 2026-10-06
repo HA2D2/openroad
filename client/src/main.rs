@@ -57,15 +57,38 @@ enum AppMode {
     DebugMode,
 }
 
-/// The render plugin, by default exactly Bevy's. `OPENROAD_GPU_BASELINE=1` instead requests only
-/// what a ~2014 desktop GPU guarantees — WebGPU-baseline limits, no optional features except BC
-/// texture compression (every D3D10+-class GPU has it, and every DDJ texture is BC) — so features
-/// the client would need beyond old hardware show up as validation errors on a current machine.
-/// `WGPU_SETTINGS_PRIO=webgpu` alone also drops BC, which no real old PC lacks.
-fn gpu_baseline_render_plugin() -> bevy::render::RenderPlugin {
+/// The GPU features Bevy's bindless material slabs need; withheld unless
+/// `graphics.bindless_materials` is on (nothing else in the client uses binding arrays).
+fn bindless_features() -> bevy::render::settings::WgpuFeatures {
+    use bevy::render::settings::WgpuFeatures;
+    WgpuFeatures::TEXTURE_BINDING_ARRAY
+        | WgpuFeatures::BUFFER_BINDING_ARRAY
+        | WgpuFeatures::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+        | WgpuFeatures::PARTIALLY_BOUND_BINDING_ARRAY
+}
+
+/// The render plugin: Bevy's, minus the bindless-material features unless
+/// `graphics.bindless_materials` asks for them.
+///
+/// Measurement switches on top:
+/// - `OPENROAD_GPU_BASELINE=1` requests only what a ~2014 desktop GPU guarantees —
+///   WebGPU-baseline limits, no optional features except BC texture compression (every
+///   D3D10+-class GPU has it, and every DDJ texture is BC) — so features the client would need
+///   beyond old hardware show up as validation errors on a current machine.
+///   `WGPU_SETTINGS_PRIO=webgpu` alone also drops BC, which no real old PC lacks.
+/// - `OPENROAD_WGPU_DISABLE` withholds more, a comma-separated list of groups — `bindless`,
+///   `indirect` (GPU mesh preprocessing + multi-draw indirect), `mappable`
+///   (MAPPABLE_PRIMARY_BUFFERS, which Bevy turns on for integrated GPUs) — or raw wgpu feature
+///   names (`TIMESTAMP_QUERY`).
+/// - `OPENROAD_GPU_LIMITS=webgpu` constrains the device to WebGPU-default limits, keeping the
+///   features (combine with `bindless` off: Bevy enables bindless by feature alone, and the
+///   WebGPU limits allow no binding-array elements).
+fn render_plugin(
+    graphics: &plugins::config::graphics::GraphicsSettings,
+) -> bevy::render::RenderPlugin {
     use bevy::render::settings::{WgpuFeatures, WgpuSettings, WgpuSettingsPriority};
     if env::var("OPENROAD_GPU_BASELINE").is_ok_and(|v| v == "1") {
-        bevy::render::RenderPlugin {
+        return bevy::render::RenderPlugin {
             render_creation: WgpuSettings {
                 priority: WgpuSettingsPriority::WebGPU,
                 features: WgpuFeatures::TEXTURE_COMPRESSION_BC,
@@ -73,9 +96,43 @@ fn gpu_baseline_render_plugin() -> bevy::render::RenderPlugin {
             }
             .into(),
             ..default()
-        }
+        };
+    }
+
+    let mut disabled = if graphics.bindless_materials {
+        WgpuFeatures::empty()
     } else {
-        bevy::render::RenderPlugin::default()
+        bindless_features()
+    };
+    for name in env::var("OPENROAD_WGPU_DISABLE")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        disabled |= match name {
+            "bindless" => bindless_features(),
+            "indirect" => {
+                WgpuFeatures::MULTI_DRAW_INDIRECT_COUNT | WgpuFeatures::INDIRECT_FIRST_INSTANCE
+            }
+            "mappable" => WgpuFeatures::MAPPABLE_PRIMARY_BUFFERS,
+            raw => WgpuFeatures::from_name(raw).unwrap_or_else(|| {
+                eprintln!("OPENROAD_WGPU_DISABLE: unknown feature or group {raw:?}");
+                WgpuFeatures::empty()
+            }),
+        };
+    }
+    let constrained_limits = env::var("OPENROAD_GPU_LIMITS")
+        .is_ok_and(|v| v == "webgpu")
+        .then(bevy::render::settings::WgpuLimits::default);
+    bevy::render::RenderPlugin {
+        render_creation: WgpuSettings {
+            disabled_features: Some(disabled),
+            constrained_limits,
+            ..default()
+        }
+        .into(),
+        ..default()
     }
 }
 
@@ -121,6 +178,7 @@ fn main() {
     let material_defaults = config.graphics.to_material_defaults();
     let present_mode = config.window_settings.present_mode.to_present_mode();
     let desired_maximum_frame_latency = config.window_settings.frame_latency();
+    let render = render_plugin(&config.graphics);
     app.insert_resource(config)
         // Read straight out of Media.pk2 before the app ticks: the gateway
         // connect fires on the first frame, so the asset server would deliver
@@ -142,7 +200,7 @@ fn main() {
                     watch_for_changes_override: Some(cfg!(debug_assertions)),
                     ..default()
                 })
-                .set(gpu_baseline_render_plugin())
+                .set(render)
                 .set(ImagePlugin {
                     default_sampler: ImageSamplerDescriptor {
                         min_filter: ImageFilterMode::Linear,

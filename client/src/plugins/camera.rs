@@ -980,6 +980,14 @@ fn apply_window_camera_msaa(
                     .entity(entity)
                     .insert(bevy::core_pipeline::prepass::DepthPrepass);
             }
+            // `graphics.sky_reflections`: the spawn sites always attach the sky
+            // environment map; without it no lit pixel samples it at all.
+            if is_3d && !config.graphics.sky_reflections {
+                commands.entity(entity).remove::<(
+                    bevy::light::GeneratedEnvironmentMapLight,
+                    bevy::light::EnvironmentMapLight,
+                )>();
+            }
         }
     }
 }
