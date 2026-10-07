@@ -31,6 +31,7 @@ pub(super) fn build_tile_arrays(
     layers: Res<TerrainTileLayers>,
     asset_server: Res<AssetServer>,
     mut images: ResMut<Assets<Image>>,
+    texture_detail: Option<Res<crate::assets::texture_detail::TextureDetailLevel>>,
 ) {
     let Some(atlas) = atlas else {
         return;
@@ -48,28 +49,42 @@ pub(super) fn build_tile_arrays(
         }
     }
 
+    // `graphics.texture_detail`: every layer starts `skip` levels down its
+    // chain, a slice off the front of each layer's bytes (never below one
+    // 4x4 block)
+    let skip = texture_detail
+        .map_or(0, |level| level.skipped_mips())
+        .min(TILE_LAYER_MIPS - 3);
+    let skip_bytes = crate::assets::texture_detail::bc1_top_levels_len(TILE_LAYER_SIZE, skip);
     let white = white_tile_layer();
     let mut missing = 0usize;
     let arrays = std::array::from_fn(|array| {
         let first = array * TILE_ARRAY_LAYERS as usize;
         let ids = &atlas.slots[first..first + TILE_ARRAY_LAYERS as usize];
-        // as many layers as the highest defined id in this range needs
-        let count = ids.iter().rposition(Option::is_some).map_or(1, |i| i + 1);
-        let mut data = Vec::with_capacity(count * tile_layer_len());
+        // as many layers as the highest defined id in this range needs, and
+        // never exactly one: wgpu's GL backend picks a texture's GL type from
+        // its layer count, and a single layer becomes a plain 2D texture that
+        // cannot be sampled as the array the shader declares
+        let count = ids
+            .iter()
+            .rposition(Option::is_some)
+            .map_or(1, |i| i + 1)
+            .max(2);
+        let mut data = Vec::with_capacity(count * (tile_layer_len() - skip_bytes));
         for slot in &ids[..count] {
             let layer = slot
                 .as_ref()
                 .and_then(Handle::path)
                 .and_then(|path| table.get(path));
             match layer {
-                Some(layer) => data.extend_from_slice(layer),
+                Some(layer) => data.extend_from_slice(&layer[skip_bytes..]),
                 None => {
                     missing += slot.is_some() as usize;
-                    data.extend_from_slice(&white);
+                    data.extend_from_slice(&white[skip_bytes..]);
                 }
             }
         }
-        images.add(tile_array_image(count as u32, data))
+        images.add(tile_array_image(count as u32, skip, data))
     });
     drop(table);
     if missing > 0 {
@@ -80,18 +95,21 @@ pub(super) fn build_tile_arrays(
     commands.insert_resource(TerrainTileArrays(arrays));
 }
 
-fn tile_array_image(layers: u32, data: Vec<u8>) -> Image {
+/// One tile array of `layers` layers, each starting `skip` levels down the
+/// normalized chain.
+fn tile_array_image(layers: u32, skip: u32, data: Vec<u8>) -> Image {
+    let size = TILE_LAYER_SIZE >> skip;
     let mut image = Image::new_uninit(
         Extent3d {
-            width: TILE_LAYER_SIZE,
-            height: TILE_LAYER_SIZE,
+            width: size,
+            height: size,
             depth_or_array_layers: layers,
         },
         TextureDimension::D2,
         TextureFormat::Bc1RgbaUnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
-    image.texture_descriptor.mip_level_count = TILE_LAYER_MIPS;
+    image.texture_descriptor.mip_level_count = TILE_LAYER_MIPS - skip;
     // a single-layer array must still be viewed as an array
     image.texture_view_descriptor = Some(TextureViewDescriptor {
         dimension: Some(TextureViewDimension::D2Array),

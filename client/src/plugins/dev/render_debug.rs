@@ -56,7 +56,13 @@ impl Plugin for RenderControlsPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<RenderDebugSettings>()
             .init_resource::<RenderDebugSettings>()
+            // read by the fog re-insert below; MapPlugin derives it from config
+            .init_resource::<crate::plugins::map::view_range::ViewRange>()
             .add_systems(Startup, seed_terrain_settings_from_config)
+            .add_systems(
+                PreUpdate,
+                follow_config_render_scale.run_if(crate::plugins::settings::live::config_changed),
+            )
             .add_systems(
                 Update,
                 (
@@ -80,6 +86,25 @@ impl Plugin for RenderControlsInspectorPlugin {
             ResourceInspectorPlugin::<RenderDebugSettings>::default()
                 .run_if(super::dev_windows_visible),
         );
+    }
+}
+
+/// Follows `graphics.render_scale` into the field `camera::apply_render_scale`
+/// reads, so a config edit after boot reaches the view rather than only the
+/// startup seed. Writes only when the configured value itself moved: any
+/// write re-runs every `on_*_changed` system here, and an unrelated config
+/// edit must not undo a value set from the panel or over BRP.
+fn follow_config_render_scale(
+    config: Res<crate::plugins::config::ClientConfig>,
+    mut settings: ResMut<RenderDebugSettings>,
+    mut applied: Local<Option<f32>>,
+) {
+    let scale = config.graphics.render_scale.factor();
+    if *applied != Some(scale) {
+        *applied = Some(scale);
+        if settings.render_scale != scale {
+            settings.render_scale = scale;
+        }
     }
 }
 
@@ -411,7 +436,11 @@ fn on_settings_changed(
     camera_query: Query<Entity, With<Camera>>,
     main_cameras: Query<(Entity, &RenderTarget), With<Camera3d>>,
     ui_camera: Query<Entity, With<Camera2d>>,
-    config: Res<ClientConfig>,
+    // tupled: this system is at the 16-parameter ceiling
+    (config, view): (
+        Res<ClientConfig>,
+        Res<crate::plugins::map::view_range::ViewRange>,
+    ),
     // One Local for every "only write when the flag actually moved" guard:
     // the system is at the 16-param limit (see on_foliage_settings_changed).
     mut applied: Local<AppliedToggles>,
@@ -449,7 +478,7 @@ fn on_settings_changed(
         if settings.enable_fog {
             commands
                 .entity(camera_entity)
-                .insert(rendering::fog(&config.graphics.fog));
+                .insert(rendering::fog(&config.graphics.fog, &view));
         } else {
             commands.entity(camera_entity).remove::<DistanceFog>();
         }

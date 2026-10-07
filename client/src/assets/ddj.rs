@@ -239,6 +239,22 @@ impl JMXVDDJ {
     }
 }
 
+/// What a ground tile's own asset holds once the loader has captured its
+/// array layer and tint: one white texel (see the loader's terrain branch).
+fn ground_tile_placeholder() -> Image {
+    Image::new_fill(
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[255, 255, 255, 255],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
 /// Decode a bare DDS byte buffer into an `Image`, reusing the same format handling as
 /// `JMXVDDJ::to_image`. The terrain lightmap format (JMXVMAPT, `assets/t.rs`) embeds a DDS
 /// payload with the identical `size`/`type`/DDS-bytes tail as JMXVDDJ, so it decodes through
@@ -950,13 +966,18 @@ pub struct DdjSettings {
 pub struct DDJLoader {
     tile_tints: crate::assets::tile_tint::TerrainTileTints,
     tile_layers: crate::assets::tile_layers::TerrainTileLayers,
+    texture_detail: crate::assets::texture_detail::TextureDetailLevel,
 }
 
 impl bevy::prelude::FromWorld for DDJLoader {
     fn from_world(world: &mut bevy::prelude::World) -> Self {
         world.init_resource::<crate::assets::tile_tint::TerrainTileTints>();
         world.init_resource::<crate::assets::tile_layers::TerrainTileLayers>();
+        world.init_resource::<crate::assets::texture_detail::TextureDetailLevel>();
         Self {
+            texture_detail: world
+                .resource::<crate::assets::texture_detail::TextureDetailLevel>()
+                .clone(),
             tile_tints: world
                 .resource::<crate::assets::tile_tint::TerrainTileTints>()
                 .clone(),
@@ -1038,6 +1059,21 @@ impl AssetLoader for DDJLoader {
                 if ddj_file.is_terrain_texture {
                     self.tile_tints
                         .derive(load_context.path().clone_owned(), &image);
+                    // Everything the client samples of a ground tile is its
+                    // array layer (captured above) and its tint (just now);
+                    // both terrain draw paths bind the arrays (ADR 0011). The
+                    // asset itself is only a load handle to wait on, so a
+                    // full upload of it would be a second, never-sampled copy
+                    // of every tile in VRAM: ~170 KB each, ~126 MB over the
+                    // 752 shipped tiles. A 1x1 texel keeps the handle valid.
+                    return Ok(ground_tile_placeholder());
+                }
+                let mut image = image;
+                if crate::assets::texture_detail::applies_to(load_context.path()) {
+                    crate::assets::texture_detail::drop_top_mips(
+                        &mut image,
+                        self.texture_detail.skipped_mips(),
+                    );
                 }
                 // let mut sampler_desc = ImageSamplerDescriptor {
                 //     address_mode_u: ImageAddressMode::Repeat,
