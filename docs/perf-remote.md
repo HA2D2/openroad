@@ -799,9 +799,14 @@ What happened under it (2026-10-07, `SCENE=world`):
   entry). wgpu validates this on every backend, so a real GL 3.3 card fails the
   same way. Bevy's error policy then quits.
 - With that one size corrected, the world scene loads and renders correctly,
-  with no other validation error. The fix is carried in the repository as a
-  patched `bevy_pbr` (`vendor/bevy_pbr`, `[patch.crates-io]`; see
-  `vendor/README.md`) until an upstream release has it.
+  with no other validation error. The fix is not carried in the repository,
+  because without the runtime WebGL paths below it makes no player's GPU
+  work. To re-apply it, vendor `bevy_pbr` 0.19.1 and wire it in with
+  `[patch.crates-io]`. Then, in its `src/render/mesh_view_bindings.rs`, give
+  the `(14, buffer_layout(...))` entry a `min_binding_size` of
+  `64 * Vec4::min_size()` when the binding type is `BufferBindingType::Uniform`,
+  instead of `Vec4::min_size()`. Until then `OPENROAD_GPU_BASELINE=gl33`
+  stops at this validation error.
 
 The **real** GL backend (`cargo build -p client --features gles`, then
 `WGPU_BACKEND=gl`, on a current AMD driver, 2026-10-07) goes further, and
