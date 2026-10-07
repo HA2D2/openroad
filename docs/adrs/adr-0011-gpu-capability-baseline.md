@@ -54,5 +54,8 @@ defaults cost ~3 ms"): bindless material slabs (~1.7 ms) and the sky environment
   old hardware matters.
 - Native OpenGL (`--features gles`, `WGPU_BACKEND=gl`) is *not* covered by this floor:
   Bevy's SSAO compute shader fails GLSL translation there, so GL support needs a Bevy
-  fix or patch first. WebGL2-class limits (no storage buffers) are below the floor
+  fix or patch first. (2026-10-07: on a real GL 3.3 card SSAO is skipped, because Bevy
+  only registers it with five storage textures. The blocker under GL 3.3-class limits
+  is a different Bevy 0.19 bug, in the visibility-range uniform fallback; see
+  `docs/perf-remote.md`, "The GL 3.3 floor", and ADR 0012.) WebGL2-class limits (no storage buffers) are below the floor
   too: Bevy's FPS overlay frame-time graph needs storage buffers.

@@ -13,6 +13,11 @@ OpenRoad itself is **GPL-3.0-or-later** throughout; see `LICENSE`.
 |---|---|---|---|
 | Blowfish block cipher | `bevy_pk2/src/pk2/blowfish.rs` | [RustCrypto/block-ciphers](https://github.com/RustCrypto/block-ciphers) | Apache-2.0 OR MIT, © RustCrypto Developers |
 | Blowfish block cipher | `client/src/net/blowfish.rs` | [RustCrypto/block-ciphers](https://github.com/RustCrypto/block-ciphers) | Apache-2.0 OR MIT, © RustCrypto Developers |
+| `bevy_pbr` 0.19.1, patched | `vendor/bevy_pbr/` | [bevyengine/bevy](https://github.com/bevyengine/bevy) | MIT OR Apache-2.0, © the Bevy contributors |
+
+`vendor/bevy_pbr` is the published crate with one fix for GPUs without
+storage buffers, marked `OPENROAD PATCH`; `vendor/README.md` says what and
+why. Its licence texts ship inside it (`LICENSE-MIT`, `LICENSE-APACHE`).
 
 Both are adapted copies rather than verbatim ones: the API surface was reduced,
 and the SRO-specific key handling around them (the PK2 salt fold in

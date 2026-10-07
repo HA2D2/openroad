@@ -38,6 +38,12 @@ rand = "0.9"
 rgb565 = "0.1.3"
 thiserror = { workspace = true }
 unidecode = "0.3.0"
+# The `auto` graphics preset probes the GPU before the App exists
+# (plugins/config/gpu_probe.rs), which needs wgpu's Instance, and Bevy does not
+# re-export it. The same version Bevy already pulls in, with no features of its
+# own: feature unification gives it Bevy's backends, so no new crate enters the
+# tree.
+wgpu = { version = "29.0.4", default-features = false }
 palette = "0.7.2"
 packets = { path = "../packets" }
 bevy_pk2 = { path = "../bevy_pk2" }

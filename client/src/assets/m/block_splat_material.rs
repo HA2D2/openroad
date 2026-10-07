@@ -817,6 +817,11 @@ pub(crate) fn uniform_binding(size: u64) -> BindingType {
     }
 }
 
+/// The ground tiles' anisotropic filtering clamp, `graphics.anisotropy`. Set
+/// once by `main` before the renderer exists; the sampler is created in the
+/// render world, which has no `ClientConfig`.
+pub static TILE_ANISOTROPY: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(4);
+
 /// The repeat + anisotropic sampler ground tiles are drawn with.
 pub(crate) fn tile_sampler_descriptor() -> SamplerDescriptor<'static> {
     SamplerDescriptor {
@@ -827,8 +832,9 @@ pub(crate) fn tile_sampler_descriptor() -> SamplerDescriptor<'static> {
         address_mode_v: AddressMode::Repeat,
         address_mode_w: AddressMode::Repeat,
         // ground tiles are viewed at grazing angles almost everywhere;
-        // 4x aniso keeps them sharp where trilinear over-blurs
-        anisotropy_clamp: 4,
+        // aniso (4x unless `graphics.anisotropy` says otherwise) keeps them
+        // sharp where trilinear over-blurs
+        anisotropy_clamp: TILE_ANISOTROPY.load(std::sync::atomic::Ordering::Relaxed),
         ..default()
     }
 }
