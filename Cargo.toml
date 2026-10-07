@@ -9,8 +9,6 @@ members = [
     "tools",
     "bevy_pk2"
 , "launcher"]
-# Patched copies of upstream crates (vendor/README.md): dependencies, not members.
-exclude = ["vendor/bevy_pbr"]
 
 [workspace.package]
 version = "0.1.6"
@@ -72,8 +70,3 @@ debug = false
 [profile.release]
 lto = "thin"
 strip = "debuginfo"
-
-# bevy_pbr 0.19.1 with one fix for GPUs without storage buffers (GL 3.3,
-# WebGL2): see vendor/README.md. Remove once an upstream release has it.
-[patch.crates-io]
-bevy_pbr = { path = "vendor/bevy_pbr" }
